@@ -6,6 +6,7 @@ const state = {
   pollTimer: null,
   polling: false,
   participants: [],
+  totalRounds: 1,
 };
 
 const baseUrl = $('baseUrl');
@@ -110,6 +111,7 @@ function formatTime(value) {
 function statusText(item) {
   switch (item.status) {
     case 'replying': return '等待该窗口回复';
+    case 'retrying': return '首次未回，正在自动补发';
     case 'replied': return '刚刚已回复';
     case 'error': return `异常 · ${item.error || '未返回'}`;
     default: return '待命 · 在线状态由网页窗口决定';
@@ -173,11 +175,16 @@ function appendMessage(message) {
   const time = document.createElement('span');
   time.className = 'message-time';
   time.textContent = formatTime(message.created_at);
+  head.append(authorNode, time);
+  if (Number(message.round) > 0) {
+    const roundBadge = document.createElement('span');
+    roundBadge.className = 'message-round';
+    roundBadge.textContent = `第 ${message.round} 轮`;
+    head.append(roundBadge);
+  }
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = String(message.content ?? '');
-
-  head.append(authorNode, time);
   card.append(head, bubble);
   row.append(avatar, card);
   messages.append(row);
@@ -208,9 +215,10 @@ async function api(path, init = {}) {
   return body;
 }
 
-function updateQueueState(processing, queued) {
+function updateQueueState(processing, queued, activeRound = 0, totalRounds = state.totalRounds) {
   if (processing) {
-    queueState.textContent = queued ? `讨论中 · 排队 ${queued}` : '讨论中';
+    const roundText = activeRound ? `第 ${activeRound}/${totalRounds} 轮` : '准备讨论';
+    queueState.textContent = queued ? `${roundText} · 排队 ${queued}` : roundText;
     queueState.className = 'queue-state active';
   } else {
     queueState.textContent = queued ? `等待 ${queued}` : '空闲';
@@ -245,10 +253,11 @@ async function connect() {
     roomTitle.textContent = `# ${data.room}`;
     roomSubtitle.textContent = `CWapi 原版 Agent · ${data.model || 'cwapi-web-gpt'} · ${data.rounds} 轮`;
     state.cursor = 0;
+    state.totalRounds = Number(data.rounds || 1);
     messages.querySelectorAll('.message, .error-banner').forEach((node) => node.remove());
     renderParticipants(data.participants || []);
     setConnection(true, '连接成功');
-    updateQueueState(false, 0);
+    updateQueueState(false, 0, 0, state.totalRounds);
     startPolling();
     messageInput.focus();
   } catch (error) {
@@ -269,7 +278,7 @@ async function pollMessages() {
       if (Number(item.sequence) > state.cursor) state.cursor = Number(item.sequence);
     }
     if (Number(data.cursor) > state.cursor) state.cursor = Number(data.cursor);
-    updateQueueState(Boolean(data.processing), Number(data.queued_turns || 0));
+    updateQueueState(Boolean(data.processing), Number(data.queued_turns || 0), Number(data.active_round || 0), Number(data.total_rounds || state.totalRounds));
     connectionStatus.textContent = '连接成功';
     connectionStatus.className = 'status online';
   } catch (error) {

@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url';
 const host = '127.0.0.1';
 const port = Number(process.env.CHAT_TEAM_PORT || 32324);
 const root = fileURLToPath(new URL('../public/', import.meta.url));
-const broadcastHoldMs = clampInt(process.env.CHAT_TEAM_BROADCAST_MS, 1500, 250, 10000);
-const controlTimeoutMs = clampInt(process.env.CHAT_TEAM_CONTROL_TIMEOUT_MS, 90000, 5000, 180000);
+const broadcastHoldMs = clampInt(process.env.CHAT_TEAM_BROADCAST_MS, 4000, 500, 12000);
+const broadcastSettleMs = clampInt(process.env.CHAT_TEAM_BROADCAST_SETTLE_MS, 600, 0, 3000);
+const controlTimeoutMs = clampInt(process.env.CHAT_TEAM_CONTROL_TIMEOUT_MS, 45000, 5000, 180000);
 const maxMessageBytes = 20 * 1024;
 const maxParticipants = 4;
 const maxRounds = 3;
@@ -187,12 +188,12 @@ function chatCompletionBody(messages, metadata) {
 function teamRulesText() {
   return `chat-team 多人聊天室规则（仅在本次连接的第一条用户广播发送一次，后续持续遵守）：
 1. 你的成员身份由网页启动提示词固定，不要自行改名。当前房间：${connection.room}；成员：${settings.participants.join(', ')}。
-2. 持续调用 agent_exchange。每次返回 requests 时扫描整个批次，并逐个查看 metadata；不要只看第一条 request。
-3. chat_team_kind=broadcast：这是所有成员共享的聊天消息。只读取并记住正文，不得对该 request 提交 completion、tool_call、progress 或其他 response。广播稍后被本地客户端主动取消是正常行为。
-4. chat_team_kind=control：同一轮所有成员的 control 会并发出现。只处理 chat_team_target 完全等于你成员身份的那一条；对同批次其他成员的 control 不提交任何 response。
-5. 找不到属于自己的 control，或完成自己的 control 后仍看到其他成员 control 时，不要在网页输出“不能抢答”“等待”“不是我的请求”等自然语言，也不要结束当前工具循环；直接再次调用 agent_exchange，直到出现新的 broadcast 或属于你的 control。
-6. 处理属于你的 control 时，结合此前收到的所有 broadcast 正常参与讨论。通过 agent_exchange.responses 对该 control 的准确 request_id 提交 completion，response 为 {"content":"你的聊天室发言","finish_reason":"stop"}。聊天室发言只回传 MCP，不要另外在网页重复输出。
-7. 若 control 允许跳过且本轮确实没有新的有价值内容，返回 ${skipToken}。delivery>1 是同一个 request 的重投，不是新聊天消息。不要调用 agent_close，除非用户明确让你退出聊天室。`;
+2. 每次 agent_exchange 返回的 request 都要独立查看 metadata。
+3. chat_team_kind=broadcast：这是所有成员共享的聊天消息。只读取并记住正文，不得对该 request 提交 completion、tool_call、progress 或其他 response；直接继续 agent_exchange。该 request 稍后被本地客户端主动取消是正常行为。
+4. chat_team_kind=control：只有 chat_team_target 完全等于你的成员身份时才处理。其他 target 属于别的 Web GPT，不得提交 response，也不要在网页输出“等待”“不能抢答”“不是我的请求”等提示；直接继续 agent_exchange。
+5. 处理属于你的 control 时，结合此前收到的所有 broadcast 正常参与讨论，并通过 agent_exchange.responses 对该 control 的准确 request_id 提交 completion。不要只在网页里输出而不回传 MCP。
+6. 用户选择几轮，就代表每个成员每轮都要实际发言。不要返回 [[SKIP]]。第 1 轮直接回答用户；第 2 轮起回应、质疑或补充其他成员观点，避免机械重复自己上一轮内容。
+7. delivery>1 是同一个 request 的重投，不是新聊天消息。完成自己的 control 后立即继续 agent_exchange；不要调用 agent_close，除非用户明确让你退出聊天室。`;
 }
 
 function broadcastBody({ turnId, sender, content, round, kind, includeRules = false }) {
@@ -207,7 +208,7 @@ function broadcastBody({ turnId, sender, content, round, kind, includeRules = fa
   });
   return chatCompletionBody(messages, {
     chat_team: true,
-    chat_team_protocol: 'broadcast-control-v1',
+    chat_team_protocol: 'broadcast-control-v2',
     chat_team_kind: 'broadcast',
     chat_team_message_kind: kind,
     chat_team_room: connection.room,
@@ -218,20 +219,28 @@ function broadcastBody({ turnId, sender, content, round, kind, includeRules = fa
   });
 }
 
-function controlBody({ turnId, target, round }) {
+function controlBody({ turnId, target, round, recovery = false }) {
+  const phase = round === 1
+    ? '这是第一轮：直接回答用户的问题，给出你自己的判断。'
+    : '这是后续轮次：结合上一轮共享回复，回应、质疑或补充其他成员观点，并提供至少一个新的信息点。';
+  const recoveryNote = recovery
+    ? '这是补发控制：你上一请求未产生可用聊天室发言。请这次务必提交实际回复，不要返回 [[SKIP]]。'
+    : '';
   return chatCompletionBody([
     {
       role: 'user',
-      content: `chat-team control：现在轮到 ${target} 发言。按首次 broadcast 中的聊天室规则处理；结合此前共享消息回复。没有新观点可返回 ${skipToken}。`,
+      content: `chat-team control：target=${target}，第 ${round}/${settings.rounds} 轮。${phase}${recoveryNote}\n若你在本网页窗口绑定的成员身份就是 ${target}：请对本 request 的准确 request_id 通过 agent_exchange.responses 提交 completion，只返回要显示在聊天室里的正文，然后立即继续 agent_exchange。不得返回 [[SKIP]]。\n若你的身份不是 ${target}：不要提交任何 response，也不要在网页输出“等待/不能抢答/不是我的请求”等提示，直接继续 agent_exchange。`,
     },
   ], {
     chat_team: true,
-    chat_team_protocol: 'broadcast-control-v1',
+    chat_team_protocol: 'broadcast-control-v2',
     chat_team_kind: 'control',
     chat_team_room: connection.room,
     chat_team_turn: turnId,
     chat_team_target: target,
     chat_team_round: round,
+    chat_team_attempt: recovery ? 2 : 1,
+    chat_team_recovery: recovery,
   });
 }
 async function postCompletion(body, signal) {
@@ -277,12 +286,12 @@ async function broadcastSharedMessage(message) {
   }
 }
 
-async function askParticipant({ turnId, target, round }) {
+async function askParticipant({ turnId, target, round, recovery = false }) {
   const controller = new AbortController();
   activeControllers.add(controller);
   const timer = setTimeout(() => controller.abort(), controlTimeoutMs);
   try {
-    const payload = await postCompletion(controlBody({ turnId, target, round }), controller.signal);
+    const payload = await postCompletion(controlBody({ turnId, target, round, recovery }), controller.signal);
     return extractCompletionText(payload);
   } catch (error) {
     if (error?.name === 'AbortError') throw codedError('PARTICIPANT_TIMEOUT', `${target} 等待超时`, 504);
@@ -293,7 +302,31 @@ async function askParticipant({ turnId, target, round }) {
   }
 }
 
+function needsRecovery(result) {
+  if (!result || result.error) return true;
+  const reply = String(result.reply || '').trim();
+  return !reply || reply === skipToken;
+}
+
+async function runControlBatch({ turnId, round, targets, recovery = false }) {
+  return Promise.all(targets.map(async (target) => {
+    try {
+      const reply = await askParticipant({ turnId, target, round, recovery });
+      return { target, reply, recovery };
+    } catch (error) {
+      return { target, error, recovery };
+    }
+  }));
+}
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function processTurn(turn) {
+  chat.activeTurn = turn.id;
+  chat.activeRound = 0;
   const includeRules = !chat.rulesSent;
   await broadcastSharedMessage({
     turnId: turn.id,
@@ -306,43 +339,61 @@ async function processTurn(turn) {
   if (includeRules) chat.rulesSent = true;
 
   for (let round = 1; round <= settings.rounds && connection.connected; round += 1) {
+    chat.activeRound = round;
     for (const target of settings.participants) {
       setParticipantState(target, { status: 'replying', error: '' });
     }
 
-    const results = await Promise.all(settings.participants.map(async (target) => {
-      try {
-        const reply = await askParticipant({ turnId: turn.id, target, round });
-        return { target, reply };
-      } catch (error) {
-        return { target, error };
+    let results = await runControlBatch({
+      turnId: turn.id,
+      round,
+      targets: settings.participants,
+      recovery: false,
+    });
+
+    if (!connection.connected) return;
+    const retryTargets = results.filter(needsRecovery).map((item) => item.target);
+    if (retryTargets.length) {
+      for (const target of retryTargets) {
+        setParticipantState(target, { status: 'retrying', error: '' });
       }
-    }));
+      const retries = await runControlBatch({
+        turnId: turn.id,
+        round,
+        targets: retryTargets,
+        recovery: true,
+      });
+      const retryMap = new Map(retries.map((item) => [item.target, item]));
+      results = results.map((item) => needsRecovery(item) ? (retryMap.get(item.target) || item) : item);
+    }
 
     if (!connection.connected) return;
     const peerReplies = [];
     for (const result of results) {
       const { target } = result;
-      if (result.error) {
-        const code = result.error?.code || result.error?.message || 'PARTICIPANT_FAILED';
+      if (needsRecovery(result)) {
+        const code = result.error?.code || result.error?.message || 'PARTICIPANT_NO_REPLY';
         setParticipantState(target, { status: 'error', error: String(code) });
-        appendMessage({ role: 'system', sender: '系统', content: `${target} 本轮未返回：${code}`, turnId: turn.id, round });
+        appendMessage({
+          role: 'system',
+          sender: '系统',
+          content: `${target} 第 ${round}/${settings.rounds} 轮两次尝试均未返回可用发言：${code}`,
+          turnId: turn.id,
+          round,
+        });
         continue;
       }
-      const reply = result.reply;
-      if (!reply || reply === skipToken) {
-        setParticipantState(target, { status: 'ready', error: '' });
-        continue;
-      }
+      const reply = String(result.reply).trim();
       const message = appendMessage({ role: 'assistant', sender: target, content: reply, turnId: turn.id, round });
       setParticipantState(target, { status: 'replied', error: '', lastReplyAt: message.created_at });
       peerReplies.push({ target, reply, createdAt: message.created_at });
     }
 
-    if (peerReplies.length) {
+    if (peerReplies.length && connection.connected) {
+      await sleep(broadcastSettleMs);
       await broadcastSharedMessage({
         turnId: turn.id,
-        sender: '本轮成员回复',
+        sender: `第 ${round} 轮成员回复`,
         content: peerReplies.map((item) => `${item.target}：${item.reply}`).join('\n\n'),
         round,
         kind: 'peer_batch',
@@ -353,6 +404,8 @@ async function processTurn(turn) {
       setParticipantState(item.target, { status: 'ready', error: '', lastReplyAt: item.createdAt });
     }
   }
+  chat.activeRound = 0;
+  chat.activeTurn = '';
 }
 async function pumpQueue() {
   if (chat.processing) return;
@@ -373,6 +426,8 @@ async function pumpQueue() {
     }
   } finally {
     chat.processing = false;
+    chat.activeRound = 0;
+    chat.activeTurn = '';
   }
 }
 
@@ -384,6 +439,8 @@ function resetChat() {
   chat.queue = [];
   chat.processing = false;
   chat.rulesSent = false;
+  chat.activeRound = 0;
+  chat.activeTurn = '';
   resetParticipantStates();
 }
 
@@ -398,7 +455,11 @@ async function handleApi(req, res, url) {
       rounds: settings.rounds,
       processing: chat.processing,
       queued_turns: chat.queue.length,
+      active_round: chat.activeRound,
+      total_rounds: settings.rounds,
+      active_turn: chat.activeTurn,
       broadcast_hold_ms: broadcastHoldMs,
+      broadcast_settle_ms: broadcastSettleMs,
     });
   }
 
@@ -456,6 +517,9 @@ async function handleApi(req, res, url) {
       participants: participantSnapshot(),
       processing: chat.processing,
       queued_turns: chat.queue.length,
+      active_round: chat.activeRound,
+      total_rounds: settings.rounds,
+      active_turn: chat.activeTurn,
     });
   }
 
