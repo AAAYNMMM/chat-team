@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -18,7 +18,7 @@
       </div>
 
       <section class="panel connection-panel">
-        <div class="panel-title">CWapi Agent</div>
+        <div class="panel-title">CWapi 2.0.5 Agent</div>
         <label>
           <span>服务地址</span>
           <input id="baseUrl" value="http://127.0.0.1:32123/v1" spellcheck="false" />
@@ -28,26 +28,40 @@
           <input id="apiKey" type="password" placeholder="输入 Agent API Key" autocomplete="off" />
         </label>
         <label>
-          <span>房间</span>
+          <span>房间名</span>
           <input id="room" value="main" spellcheck="false" />
+        </label>
+        <label>
+          <span>Web GPT 成员</span>
+          <input id="participantNames" value="GPT-A, GPT-B, GPT-C" spellcheck="false" />
+        </label>
+        <label>
+          <span>每次讨论轮数</span>
+          <select id="rounds">
+            <option value="1" selected>1 轮</option>
+            <option value="2">2 轮</option>
+            <option value="3">3 轮</option>
+          </select>
         </label>
         <button id="connectButton" class="primary">连接</button>
         <div id="connectionStatus" class="status offline">未连接</div>
       </section>
 
       <section class="panel join-panel">
-        <div class="panel-title">Web GPT 加入房间</div>
-        <p class="hint">每个网页窗口先执行一次下面的提示词，然后保持该窗口继续连接。</p>
-        <textarea id="joinPrompt" class="join-prompt" rows="5" readonly></textarea>
-        <button id="copyPromptButton" class="secondary">复制提示词</button>
+        <div class="panel-title row">
+          <span>网页窗口启动提示词</span>
+          <span id="promptCount" class="badge">3</span>
+        </div>
+        <p class="hint">每个 Web GPT 窗口复制自己那一条。身份必须不同，否则几个窗口会抢同一个控制请求，像三个人同时去接一部电话。</p>
+        <div id="joinPrompts" class="join-prompts"></div>
       </section>
 
       <section class="panel participants-panel">
         <div class="panel-title row">
-          <span>参与者</span>
+          <span>成员状态</span>
           <span id="participantCount" class="badge">0</span>
         </div>
-        <div id="participants" class="participants empty">等待成员进入房间</div>
+        <div id="participants" class="participants empty">连接后显示配置成员</div>
       </section>
     </aside>
 
@@ -55,16 +69,19 @@
       <header class="chat-header">
         <div>
           <h2 id="roomTitle"># main</h2>
-          <p id="roomSubtitle">连接 CWapi 后开始讨论</p>
+          <p id="roomSubtitle">连接原版 CWapi 2.0.5 后开始讨论</p>
         </div>
-        <div id="liveState" class="live-state">离线</div>
+        <div class="header-state">
+          <span id="queueState" class="queue-state">空闲</span>
+          <span id="liveState" class="live-state">离线</span>
+        </div>
       </header>
 
       <section id="messages" class="messages">
         <div class="welcome">
           <div class="welcome-icon">✦</div>
-          <h3>一个人类，几个 Web GPT，同一个房间。</h3>
-          <p>用户消息由 chat team 发给 CWapi。Web GPT 的消息从共享 Agent 房间同步回来，这里只负责把它们好好显示出来。</p>
+          <h3>一个人类，多个 Web GPT，同一个讨论。</h3>
+          <p>每条真实聊天正文只广播一次。chat team 另外发送很小的定向控制请求，决定现在轮到哪个 Web GPT 发言；CWapi 本身不需要任何修改。</p>
         </div>
       </section>
 
