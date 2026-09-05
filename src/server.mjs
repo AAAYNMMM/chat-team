@@ -33,6 +33,7 @@ const chat = {
   queue: [],
   processing: false,
   participantStates: new Map(),
+  rulesSent: false,
 };
 
 const activeControllers = new Set();
@@ -183,40 +184,49 @@ function chatCompletionBody(messages, metadata) {
   };
 }
 
-function broadcastBody({ turnId, sender, content, round, kind }) {
+function teamRulesText() {
+  return `chat-team 多人聊天室规则（仅在本次连接的第一条用户广播发送一次，后续持续遵守）：
+1. 你的成员身份由网页启动提示词固定，不要自行改名。当前房间：${connection.room}；成员：${settings.participants.join(', ')}。
+2. 每次 agent_exchange 返回的 request 都要独立查看 metadata。
+3. chat_team_kind=broadcast：这是所有成员共享的聊天消息。只读取并记住正文，不得对该 request 提交 completion、tool_call、progress 或其他 response；直接继续 agent_exchange。该 request 稍后被本地客户端主动取消是正常行为。
+4. chat_team_kind=control：只有 chat_team_target 完全等于你的成员身份时才处理。其他 target 属于别的 Web GPT，不得提交 response，继续等待。
+5. 处理属于你的 control 时，结合此前收到的所有 broadcast（用户和其他 Web GPT 发言）正常参与讨论。通过下一次 agent_exchange.responses 对 control 的准确 request_id 提交 completion，response 为 {"content":"你的聊天室发言","finish_reason":"stop"}。不要只在网页里输出而不回传 MCP。
+6. 若 control 允许跳过且本轮确实没有新的有价值内容，返回 ${skipToken}。提交后继续 agent_exchange。
+7. delivery>1 是同一个 request 的重投，不是新聊天消息。不要调用 agent_close，除非用户明确让你退出聊天室。`;
+}
+
+function broadcastBody({ turnId, sender, content, round, kind, includeRules = false }) {
   const senderLabel = sender === 'user' ? '用户' : sender;
-  return chatCompletionBody([
-    {
-      role: 'system',
-      content: 'chat-team 共享消息广播。所有 Web GPT 窗口都可能收到此请求。只读取并记住消息，不要对这个 request 提交 completion、tool_call 或 progress。继续 agent_exchange，等待 chat_team_kind=control 且 target 是你自己的控制请求。',
-    },
-    {
-      role: 'user',
-      content: `[chat-team shared message]\n发送者：${senderLabel}\n内容：${content}`,
-    },
-  ], {
+  const messages = [];
+  if (includeRules) {
+    messages.push({ role: 'system', content: teamRulesText() });
+  }
+  messages.push({
+    role: 'user',
+    content: `[chat-team broadcast]\n发送者：${senderLabel}\n内容：${content}`,
+  });
+  return chatCompletionBody(messages, {
     chat_team: true,
+    chat_team_protocol: 'broadcast-control-v1',
     chat_team_kind: 'broadcast',
     chat_team_message_kind: kind,
     chat_team_room: connection.room,
     chat_team_turn: turnId,
     chat_team_sender: sender,
     chat_team_round: round,
+    chat_team_rules: includeRules ? 'included' : 'remembered',
   });
 }
 
 function controlBody({ turnId, target, round }) {
   return chatCompletionBody([
     {
-      role: 'system',
-      content: 'chat-team 发言控制请求。只有 metadata.chat_team_target 与你在本网页窗口预先绑定的身份完全一致时，才允许对此 request 提交 completion。其他窗口必须忽略本 request 并继续 agent_exchange。',
-    },
-    {
       role: 'user',
-      content: `现在轮到 ${target} 发言。请基于本窗口此前收到并记住的 chat-team shared message 参与讨论。只返回要显示在聊天室里的正文。若本轮确实没有新的有价值内容，返回 ${skipToken}。`,
+      content: `chat-team control：现在轮到 ${target} 发言。按首次 broadcast 中的聊天室规则处理；结合此前共享消息回复。没有新观点可返回 ${skipToken}。`,
     },
   ], {
     chat_team: true,
+    chat_team_protocol: 'broadcast-control-v1',
     chat_team_kind: 'control',
     chat_team_room: connection.room,
     chat_team_turn: turnId,
@@ -224,7 +234,6 @@ function controlBody({ turnId, target, round }) {
     chat_team_round: round,
   });
 }
-
 async function postCompletion(body, signal) {
   return cwapi('/chat/completions', {
     method: 'POST',
@@ -285,13 +294,16 @@ async function askParticipant({ turnId, target, round }) {
 }
 
 async function processTurn(turn) {
+  const includeRules = !chat.rulesSent;
   await broadcastSharedMessage({
     turnId: turn.id,
     sender: 'user',
     content: turn.content,
     round: 0,
     kind: 'user',
+    includeRules,
   });
+  if (includeRules) chat.rulesSent = true;
 
   for (let round = 1; round <= settings.rounds && connection.connected; round += 1) {
     for (const target of settings.participants) {
@@ -357,6 +369,7 @@ function resetChat() {
   chat.messages = [];
   chat.queue = [];
   chat.processing = false;
+  chat.rulesSent = false;
   resetParticipantStates();
 }
 

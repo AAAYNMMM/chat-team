@@ -96,28 +96,21 @@ API Key 只保存在当前 chat-team 服务进程内存中，不写入项目文�
 
 ## Web GPT 窗口
 
-每个 Web GPT 窗口必须绑定不同身份。界面会根据成员列表生成独立启动提示词和复制按钮。
-
-例如 GPT-A 的窗口会收到类似规则：
+每个 Web GPT 窗口只需要绑定不同身份。界面会根据成员列表生成很短的启动提示词，例如：
 
 ```text
-你是 GPT-A。
-先 agent_open，然后持续 agent_exchange。
-
-broadcast：
-- 只读取并记住共享聊天正文；
-- 不提交 completion / tool_call / progress；
-- 继续 agent_exchange。
-
-control：
-- target != GPT-A：忽略，不提交 response；
-- target == GPT-A：结合此前收到的 broadcast 参与讨论；
-- 对准确 request_id 提交 completion；
-- 完成后继续 agent_exchange。
+@MCPagent 你是 chat-team 房间“main”中的成员“GPT-A”。调用 agent_open 后持续 agent_exchange；聊天室规则会由 chat-team 随第一条用户消息发送，之后一直按该规则处理，直到我让你退出。
 ```
 
-因此每个网页 GPT 自己的 ChatGPT 对话上下文天然保存它此前看到的共享消息，不需要 chat-team 每次重发完整历史。
+完整聊天室规则不再放进复制提示词。每次连接后的**第一条用户 broadcast** 会同时携带：
 
+- chat-team 的完整 broadcast / control 处理规则；
+- 当前房间和成员列表；
+- 用户本次真实聊天正文。
+
+规则只发送一次。之后的用户消息、Web GPT 回复 broadcast 和 control 都只携带必要正文或 target，不再重复整套规则。各 Web GPT 自己的 ChatGPT 对话上下文会继续保留此前看到的规则和共享消息，因此不需要 chat-team 每轮重发完整历史。
+
+发送第一条用户消息前，应先让所有 Web GPT 窗口进入持续 `agent_exchange` 状态，否则尚未连接的窗口可能错过首次规则 broadcast。
 ## 讨论轮数
 
 默认 1 轮：

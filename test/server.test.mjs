@@ -141,6 +141,21 @@ test('original CWapi surface is enough and shared chat bodies are broadcast once
   assert.equal(broadcasts.length, 4);
   assert.equal(controls.length, 3);
   assert.deepEqual(controls.map((item) => item.metadata.chat_team_target), ['GPT-A', 'GPT-B', 'GPT-C']);
+  assert.equal(broadcasts[0].metadata.chat_team_rules, 'included');
+  assert.equal(broadcasts[0].messages[0].role, 'system');
+  assert.match(broadcasts[0].messages[0].content, /chat-team 多人聊天室规则/);
+  assert.match(broadcasts[0].messages[1].content, /hello team/);
+  for (const item of broadcasts.slice(1)) {
+    assert.equal(item.metadata.chat_team_rules, 'remembered');
+    assert.equal(item.messages.length, 1);
+    assert.equal(item.messages[0].role, 'user');
+    assert.equal(JSON.stringify(item).includes('chat-team 多人聊天室规则'), false);
+  }
+  for (const item of controls) {
+    assert.equal(item.messages.length, 1);
+    assert.equal(item.messages[0].role, 'user');
+    assert.equal(JSON.stringify(item).includes('chat-team 多人聊天室规则'), false);
+  }
 
   const serialized = requests.map((item) => JSON.stringify(item));
   assert.equal(serialized.filter((item) => item.includes('hello team')).length, 1);

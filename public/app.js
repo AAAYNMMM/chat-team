@@ -49,18 +49,8 @@ function configuredParticipants() {
 
 function promptFor(name) {
   const roomName = room.value.trim() || 'main';
-  return `@MCPagent
-你现在是 chat-team 房间“${roomName}”中的独立成员“${name}”。所有网页窗口连接的是同一个原版 CWapi 2.0.5 Agent MCP。
-
-1. 先调用 agent_open，然后持续调用 agent_exchange 等待请求。不要因为一次 no_request 就退出等待。
-2. 对每个 returned request 独立查看 request.metadata。
-3. 当 metadata.chat_team=true 且 chat_team_kind="broadcast"、chat_team_room="${roomName}" 时：只读取并记住其中的共享聊天消息。绝对不要对这个 request 提交 completion、tool_call 或 progress；直接继续 agent_exchange。该广播稍后被本地客户端主动取消属于正常行为。
-4. 当 chat_team_kind="control" 时：只有 chat_team_target 完全等于“${name}”才由你处理。其他 target 属于别的 Web GPT，禁止提交 response，继续等待即可。
-5. 处理属于“${name}”的 control 时，结合此前在本网页对话里收到的用户和其他 Web GPT 的 broadcast 内容正常参与讨论。通过 agent_exchange.responses 对该 control 的准确 request_id 提交 completion，response 使用 {"content":"你的聊天室发言","finish_reason":"stop"}。不要只把回答输出在网页里而不回传 MCP。
-6. 如果控制请求明确允许跳过且本轮确实没有新观点，返回 [[SKIP]]。提交后继续 agent_exchange，保持参与聊天室。
-7. delivery>1 是同一个 request 的重投，不要把它当成新的聊天消息。不要调用 agent_close，除非用户明确让你退出聊天室。`;
+  return `@MCPagent 你是 chat-team 房间“${roomName}”中的成员“${name}”。调用 agent_open 后持续 agent_exchange；聊天室规则会由 chat-team 随第一条用户消息发送，之后一直按该规则处理，直到我让你退出。`;
 }
-
 function renderJoinPrompts() {
   const names = configuredParticipants();
   promptCount.textContent = String(names.length);
@@ -89,7 +79,7 @@ function renderJoinPrompts() {
 
     const preview = document.createElement('div');
     preview.className = 'prompt-preview';
-    preview.textContent = `${name} · 只处理 target=${name}`;
+    preview.textContent = `${name} · 首次消息接收规则`;
     card.append(head, preview);
     return card;
   }));
