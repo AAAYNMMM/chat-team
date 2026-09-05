@@ -1,273 +1,199 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
+import { promisify } from 'node:util';
 
-async function listen(server) {
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  return server.address().port;
-}
+const execFileAsync = promisify(execFile);
 
 async function reservePort() {
-  const reserve = http.createServer();
-  const port = await listen(reserve);
-  await new Promise((resolve) => reserve.close(resolve));
+  const server = http.createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
   return port;
 }
 
-async function waitFor(url, predicate = (response) => response.ok, timeout = 8000) {
+async function waitFor(url, timeout = 5000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(url);
-      if (await predicate(response)) return response;
+      if (response.ok) return response;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
   throw new Error(`Timed out waiting for ${url}`);
 }
 
-async function readBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
-async function startChatTeam(t, extraEnv = {}) {
+async function startChatTeam(t) {
   const port = await reservePort();
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       CHAT_TEAM_PORT: String(port),
-      CHAT_TEAM_BROADCAST_MS: '250',
-      CHAT_TEAM_BROADCAST_SETTLE_MS: '0',
-      CHAT_TEAM_CONTROL_TIMEOUT_MS: '5000',
-      ...extraEnv,
+      CHAT_TEAM_ASSIGNMENT_TIMEOUT_MS: '30000',
+      CHAT_TEAM_MEMBER_ONLINE_MS: '30000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
   t.after(() => child.kill());
-  await waitFor(`http://127.0.0.1:${port}/api/status`);
-  return port;
+  try {
+    await waitFor(`http://127.0.0.1:${port}/api/status?room=main`);
+  } catch (error) {
+    throw new Error(`${error.message}\nserver stderr: ${stderr}`);
+  }
+  return { port, base: `http://127.0.0.1:${port}` };
 }
 
-test('three configured rounds stay concurrent and produce visible replies every round', async (t) => {
-  const requests = [];
-  const pendingByRound = new Map();
-  const mock = http.createServer(async (req, res) => {
-    if (req.headers.authorization !== 'Bearer test-key') {
-      res.writeHead(401, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { code: 'invalid_api_key' } }));
-      return;
-    }
-    if (req.method === 'GET' && req.url === '/v1/models') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: [{ id: 'cwapi-web-gpt' }] }));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/v1/chat/completions') {
-      const body = await readBody(req);
-      requests.push(body);
-      if (body.metadata?.chat_team_kind === 'broadcast') return;
-      if (body.metadata?.chat_team_kind === 'control') {
-        const round = Number(body.metadata.chat_team_round);
-        const recovery = Boolean(body.metadata.chat_team_recovery);
-        if (recovery) {
-          const target = body.metadata.chat_team_target;
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({
-            choices: [{ message: { role: 'assistant', content: `${target} round ${round} recovered` }, finish_reason: 'stop' }],
-          }));
-          return;
-        }
-        const list = pendingByRound.get(round) || [];
-        list.push({ body, res });
-        pendingByRound.set(round, list);
-        if (list.length === 3) {
-          for (const item of list) {
-            const target = item.body.metadata.chat_team_target;
-            item.res.writeHead(200, { 'content-type': 'application/json' });
-            item.res.end(JSON.stringify({
-              choices: [{ message: { role: 'assistant', content: `${target} round ${round}` }, finish_reason: 'stop' }],
-            }));
-          }
-        }
-        return;
-      }
-    }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
-  });
-  const cwapiPort = await listen(mock);
-  t.after(() => mock.close());
-
-  const chatPort = await startChatTeam(t);
-  const connect = await fetch(`http://127.0.0.1:${chatPort}/api/connect`, {
+async function api(base, path, body) {
+  const response = await fetch(`${base}${path}`, body === undefined ? undefined : {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      baseUrl: `http://127.0.0.1:${cwapiPort}/v1`, apiKey: 'test-key', room: 'main',
-      participants: ['GPT-A', 'GPT-B', 'GPT-C'], rounds: 3,
-    }),
+    body: JSON.stringify(body),
   });
-  assert.equal(connect.status, 200);
+  const data = await response.json();
+  if (!response.ok) throw new Error(`${response.status} ${JSON.stringify(data)}`);
+  return data;
+}
 
-  const send = await fetch(`http://127.0.0.1:${chatPort}/api/messages`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'hello team' }),
+async function configure(base, rounds = 3, participants = ['GPT-A', 'GPT-B', 'GPT-C']) {
+  return api(base, '/api/configure', { room: 'main', participants, rounds });
+}
+
+async function userMessage(base, content) {
+  return api(base, '/api/messages', { room: 'main', content });
+}
+
+async function exchange(base, member, response = null, waitMs = 0) {
+  return api(base, '/api/member/exchange', {
+    room: 'main', member, wait_ms: waitMs, ...(response ? { response } : {}),
   });
-  assert.equal(send.status, 202);
+}
 
-  await waitFor(
-    `http://127.0.0.1:${chatPort}/api/messages?after=0`,
-    async (response) => {
-      if (!response.ok) return false;
-      const body = await response.clone().json();
-      return body.processing === false && body.messages?.filter((item) => item.role === 'assistant').length === 9;
-    }, 15000,
+async function assignment(base, member) {
+  const data = await exchange(base, member);
+  assert.equal(data.state, 'assignment', `${member} should receive an assignment`);
+  return data;
+}
+
+async function reply(base, member, assignmentData, content) {
+  return exchange(base, member, {
+    assignment_id: assignmentData.assignment.id,
+    content,
+  });
+}
+
+test('Coding room keeps per-member unread messages even when GPT-C arrives late', async (t) => {
+  const { base } = await startChatTeam(t);
+  await configure(base, 3);
+  await userMessage(base, '讨论这个设计');
+
+  const a1 = await assignment(base, 'GPT-A');
+  const b1 = await assignment(base, 'GPT-B');
+  assert.equal(a1.assignment.round, 1);
+  assert.equal(b1.assignment.round, 1);
+  assert.deepEqual(a1.messages.map((m) => m.content), ['讨论这个设计']);
+
+  await reply(base, 'GPT-A', a1, 'A 第一轮');
+  await reply(base, 'GPT-B', b1, 'B 第一轮');
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const c1 = await assignment(base, 'GPT-C');
+  assert.equal(c1.assignment.round, 1);
+  assert.deepEqual(
+    c1.messages.filter((m) => m.role !== 'system').map((m) => [m.sender, m.content]),
+    [['你', '讨论这个设计'], ['GPT-A', 'A 第一轮'], ['GPT-B', 'B 第一轮']],
   );
+  const c2 = await reply(base, 'GPT-C', c1, 'C 第一轮');
 
-  for (const round of [1, 2, 3]) {
-    assert.equal(pendingByRound.get(round)?.length, 3, `round ${round} controls must be in flight together`);
-  }
-  const transcript = await (await fetch(`http://127.0.0.1:${chatPort}/api/messages?after=0`)).json();
-  const replies = transcript.messages.filter((item) => item.role === 'assistant');
-  assert.equal(replies.length, 9);
-  assert.deepEqual(replies.map((item) => item.round), [1, 1, 1, 2, 2, 2, 3, 3, 3]);
-  assert.deepEqual(replies.slice(0, 3).map((item) => item.sender), ['GPT-A', 'GPT-B', 'GPT-C']);
+  const a2 = await assignment(base, 'GPT-A');
+  const b2 = await assignment(base, 'GPT-B');
+  assert.equal(c2.state, 'assignment');
+  for (const item of [a2, b2, c2]) assert.equal(item.assignment.round, 2);
+  assert.equal(c2.messages.some((m) => m.sender === 'GPT-A' && m.content === 'A 第一轮'), false, 'C already read A1 in round 1');
+  assert.equal(c2.messages.some((m) => m.sender === 'GPT-C' && m.content === 'C 第一轮'), true, 'C receives its own new room-log entry in the same exchange response that advances to round 2');
 
-  const broadcasts = requests.filter((item) => item.metadata?.chat_team_kind === 'broadcast');
-  const controls = requests.filter((item) => item.metadata?.chat_team_kind === 'control');
-  assert.equal(broadcasts.length, 4);
-  assert.equal(controls.length, 9);
-  assert.equal(broadcasts[0].metadata.chat_team_rules, 'included');
-  assert.match(broadcasts[0].messages[0].content, /每个成员每轮都要实际发言/);
-  assert.match(broadcasts[0].messages[0].content, /不要在网页输出“等待”/);
-  assert.equal(broadcasts.slice(1).every((item) => item.metadata.chat_team_message_kind === 'peer_batch'), true);
-  assert.equal(controls.every((item) => item.metadata.chat_team_protocol === 'broadcast-control-v2'), true);
-  assert.equal(controls.every((item) => item.metadata.chat_team_attempt === 1), true);
-  assert.equal(requests.some((item) => JSON.stringify(item).includes('/team/rooms/')), false);
+  await reply(base, 'GPT-A', a2, 'A 第二轮');
+  await reply(base, 'GPT-B', b2, 'B 第二轮');
+  const c3 = await reply(base, 'GPT-C', c2, 'C 第二轮');
+
+  const a3 = await assignment(base, 'GPT-A');
+  const b3 = await assignment(base, 'GPT-B');
+  assert.equal(c3.state, 'assignment');
+  for (const item of [a3, b3, c3]) assert.equal(item.assignment.round, 3);
+
+  await reply(base, 'GPT-A', a3, 'A 第三轮');
+  await reply(base, 'GPT-B', b3, 'B 第三轮');
+  await reply(base, 'GPT-C', c3, 'C 第三轮');
+
+  const transcript = await (await fetch(`${base}/api/messages?room=main&after=0`)).json();
+  assert.equal(transcript.processing, false);
+  assert.equal(transcript.messages.filter((m) => m.role === 'assistant').length, 9);
+  assert.deepEqual(
+    transcript.messages.filter((m) => m.role === 'assistant').map((m) => [m.sender, m.round]),
+    [
+      ['GPT-A', 1], ['GPT-B', 1], ['GPT-C', 1],
+      ['GPT-A', 2], ['GPT-B', 2], ['GPT-C', 2],
+      ['GPT-A', 3], ['GPT-B', 3], ['GPT-C', 3],
+    ],
+  );
 });
 
-test('missing or legacy skip reply is retried and later rounds still continue', async (t) => {
-  const requests = [];
-  const mock = http.createServer(async (req, res) => {
-    if (req.method === 'GET' && req.url === '/v1/models') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: [{ id: 'cwapi-web-gpt' }] }));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/v1/chat/completions') {
-      const body = await readBody(req);
-      requests.push(body);
-      if (body.metadata?.chat_team_kind === 'broadcast') return;
-      const target = body.metadata.chat_team_target;
-      const round = Number(body.metadata.chat_team_round);
-      const recovery = Boolean(body.metadata.chat_team_recovery);
-      let content = `${target} round ${round}`;
-      if (target === 'GPT-A' && round === 1 && !recovery) content = '[[SKIP]]';
-      if (target === 'GPT-A' && round === 2) content = recovery ? '' : '[[SKIP]]';
-      if (target === 'GPT-A' && round === 1 && recovery) content = 'GPT-A round 1 recovered';
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] }));
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
-  });
-  const cwapiPort = await listen(mock);
-  t.after(() => mock.close());
-  const chatPort = await startChatTeam(t);
+test('a member can miss an entire turn interval and still receive all unread context later', async (t) => {
+  const { base } = await startChatTeam(t);
+  await configure(base, 1);
+  await userMessage(base, '第一问');
+  const a1 = await assignment(base, 'GPT-A');
+  const b1 = await assignment(base, 'GPT-B');
+  const c1 = await assignment(base, 'GPT-C');
+  await reply(base, 'GPT-A', a1, 'A1');
+  await reply(base, 'GPT-B', b1, 'B1');
+  await reply(base, 'GPT-C', c1, 'C1');
 
-  await fetch(`http://127.0.0.1:${chatPort}/api/connect`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ baseUrl: `http://127.0.0.1:${cwapiPort}/v1`, apiKey: 'test-key', room: 'main', participants: ['GPT-A', 'GPT-B'], rounds: 3 }),
-  });
-  await fetch(`http://127.0.0.1:${chatPort}/api/messages`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'retry test' }),
-  });
+  await userMessage(base, '第二问');
+  const a2 = await assignment(base, 'GPT-A');
+  const b2 = await assignment(base, 'GPT-B');
+  await reply(base, 'GPT-A', a2, 'A2');
+  await reply(base, 'GPT-B', b2, 'B2');
 
-  await waitFor(`http://127.0.0.1:${chatPort}/api/messages?after=0`, async (response) => {
-    const body = await response.clone().json();
-    return body.processing === false && requests.some((item) => item.metadata?.chat_team_round === 3 && item.metadata?.chat_team_target === 'GPT-A');
-  }, 15000);
-
-  const transcript = await (await fetch(`http://127.0.0.1:${chatPort}/api/messages?after=0`)).json();
-  assert.equal(transcript.messages.some((item) => item.sender === 'GPT-A' && item.round === 1 && /recovered/.test(item.content)), true);
-  assert.equal(transcript.messages.some((item) => item.role === 'system' && item.round === 2 && /GPT-A/.test(item.content)), true);
-  assert.equal(transcript.messages.some((item) => item.sender === 'GPT-A' && item.round === 3), true);
-  const retries = requests.filter((item) => item.metadata?.chat_team_recovery === true);
-  assert.equal(retries.some((item) => item.metadata.chat_team_target === 'GPT-A' && item.metadata.chat_team_round === 1), true);
-  assert.equal(retries.some((item) => item.metadata.chat_team_target === 'GPT-A' && item.metadata.chat_team_round === 2), true);
+  const c2 = await assignment(base, 'GPT-C');
+  assert.deepEqual(
+    c2.messages.filter((m) => m.role !== 'system').map((m) => [m.sender, m.content]),
+    [['GPT-A', 'A1'], ['GPT-B', 'B1'], ['GPT-C', 'C1'], ['你', '第二问'], ['GPT-A', 'A2'], ['GPT-B', 'B2']],
+  );
+  await reply(base, 'GPT-C', c2, 'C2');
 });
 
-test('connect validates only the original /v1/models endpoint', async (t) => {
-  const paths = [];
-  const mock = http.createServer((req, res) => {
-    paths.push(`${req.method} ${req.url}`);
-    if (req.headers.authorization !== 'Bearer test-key') {
-      res.writeHead(401, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { code: 'invalid_api_key' } }));
-      return;
-    }
-    if (req.method === 'GET' && req.url === '/v1/models') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: [{ id: 'cwapi-web-gpt' }] }));
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
-  });
-  const cwapiPort = await listen(mock);
-  t.after(() => mock.close());
-
-  const chatPort = await startChatTeam(t);
-  const connect = await fetch(`http://127.0.0.1:${chatPort}/api/connect`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      baseUrl: `http://127.0.0.1:${cwapiPort}/v1`,
-      apiKey: 'test-key',
-      room: 'main',
-      participants: ['GPT-A'],
-      rounds: 1,
-    }),
-  });
-  assert.equal(connect.status, 200);
-  assert.deepEqual(paths, ['GET /v1/models']);
+test('duplicate assignment submissions are idempotent', async (t) => {
+  const { base } = await startChatTeam(t);
+  await configure(base, 1, ['GPT-A']);
+  await userMessage(base, '只问 A');
+  const a1 = await assignment(base, 'GPT-A');
+  const response = { assignment_id: a1.assignment.id, content: '唯一回复' };
+  await exchange(base, 'GPT-A', response);
+  await exchange(base, 'GPT-A', response);
+  const transcript = await (await fetch(`${base}/api/messages?room=main&after=0`)).json();
+  assert.equal(transcript.messages.filter((m) => m.role === 'assistant').length, 1);
+  assert.equal(transcript.messages.find((m) => m.role === 'assistant').content, '唯一回复');
 });
 
-test('message byte limit is enforced before CWapi dispatch', async (t) => {
-  let completions = 0;
-  const mock = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/v1/models') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: [{ id: 'cwapi-web-gpt' }] }));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/v1/chat/completions') completions += 1;
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
+test('member CLI talks to the local Coding room API', async (t) => {
+  const { port, base } = await startChatTeam(t);
+  await configure(base, 1, ['GPT-A']);
+  await userMessage(base, 'CLI 测试');
+  const { stdout } = await execFileAsync(process.execPath, ['src/member.mjs', 'exchange', 'GPT-A', 'main'], {
+    cwd: process.cwd(),
+    env: { ...process.env, CHAT_TEAM_URL: `http://127.0.0.1:${port}`, CHAT_TEAM_EXCHANGE_WAIT_MS: '0' },
   });
-  const cwapiPort = await listen(mock);
-  t.after(() => mock.close());
-  const chatPort = await startChatTeam(t);
-
-  await fetch(`http://127.0.0.1:${chatPort}/api/connect`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      baseUrl: `http://127.0.0.1:${cwapiPort}/v1`, apiKey: 'test-key', room: 'main', participants: ['GPT-A'], rounds: 1,
-    }),
-  });
-
-  const oversized = await fetch(`http://127.0.0.1:${chatPort}/api/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content: '中'.repeat(7000) }),
-  });
-  assert.equal(oversized.status, 400);
-  assert.equal(completions, 0);
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.state, 'assignment');
+  assert.equal(payload.member, 'GPT-A');
+  assert.equal(payload.messages[0].content, 'CLI 测试');
+  assert.deepEqual(payload.submit.argv.slice(0, 5), ['src/member.mjs', 'exchange', 'GPT-A', 'main', payload.assignment.id]);
 });

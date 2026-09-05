@@ -18,21 +18,17 @@
       </div>
 
       <section class="panel connection-panel">
-        <div class="panel-title">CWapi 2.0.5 Agent</div>
+        <div class="panel-title">CWapi Coding 模式</div>
         <label>
-          <span>服务地址</span>
-          <input id="baseUrl" value="http://127.0.0.1:32123/v1" spellcheck="false" />
-        </label>
-        <label>
-          <span>API Key</span>
-          <input id="apiKey" type="password" placeholder="输入 Agent API Key" autocomplete="off" />
+          <span>Coding 仓库</span>
+          <input id="repositoryUrl" value="https://github.com/AAAYNMMM/chat-team" spellcheck="false" />
         </label>
         <label>
           <span>房间名</span>
           <input id="room" value="main" spellcheck="false" />
         </label>
         <label>
-          <span>Web GPT 成员（最多 4）</span>
+          <span>Web GPT 成员（最多 8）</span>
           <input id="participantNames" value="GPT-A, GPT-B, GPT-C" spellcheck="false" />
         </label>
         <label>
@@ -41,10 +37,13 @@
             <option value="1" selected>1 轮</option>
             <option value="2">2 轮</option>
             <option value="3">3 轮</option>
+            <option value="4">4 轮</option>
+            <option value="5">5 轮</option>
+            <option value="6">6 轮</option>
           </select>
         </label>
-        <button id="connectButton" class="primary">连接</button>
-        <div id="connectionStatus" class="status offline">未连接</div>
+        <button id="configureButton" class="primary">应用房间</button>
+        <div id="connectionStatus" class="status offline">未配置</div>
       </section>
 
       <section class="panel join-panel">
@@ -52,7 +51,7 @@
           <span>网页窗口启动提示词</span>
           <span id="promptCount" class="badge">3</span>
         </div>
-        <p class="hint">每个 Web GPT 窗口只复制自己的短身份提示。完整聊天室规则会由 chat-team 随第一条用户消息发送一次；请先让所有窗口进入持续 agent_exchange，再发送第一条消息。</p>
+        <p class="hint">每个 Web GPT 窗口只绑定自己的成员名。之后通过 MCPcoding 直接轮询本机 chat-team，消息不会依赖 Agent 广播时机。</p>
         <div id="joinPrompts" class="join-prompts"></div>
       </section>
 
@@ -61,7 +60,7 @@
           <span>成员状态</span>
           <span id="participantCount" class="badge">0</span>
         </div>
-        <div id="participants" class="participants empty">连接后显示配置成员</div>
+        <div id="participants" class="participants empty">应用房间后显示成员</div>
       </section>
     </aside>
 
@@ -69,24 +68,24 @@
       <header class="chat-header">
         <div>
           <h2 id="roomTitle"># main</h2>
-          <p id="roomSubtitle">连接原版 CWapi 2.0.5 后开始讨论</p>
+          <p id="roomSubtitle">Coding 模式 · 本地持久消息队列</p>
         </div>
         <div class="header-state">
           <span id="queueState" class="queue-state">空闲</span>
-          <span id="liveState" class="live-state">离线</span>
+          <span id="liveState" class="live-state">未配置</span>
         </div>
       </header>
 
       <section id="messages" class="messages">
         <div class="welcome">
           <div class="welcome-icon">✦</div>
-          <h3>一个人类，多个 Web GPT，同一个讨论。</h3>
-          <p>每条真实聊天正文只广播一次。chat team 另外发送很小的定向控制请求，决定现在轮到哪个 Web GPT 发言；CWapi 本身不需要任何修改。</p>
+          <h3>一个人类，多个 Coding Web GPT，同一个房间。</h3>
+          <p>chat team 保存一次消息，每个成员用自己的读取游标可靠接收。窗口晚一点回来也会继续读未读内容，不再依赖短时 broadcast。</p>
         </div>
       </section>
 
       <footer class="composer">
-        <textarea id="messageInput" rows="1" placeholder="连接后发送消息…" disabled></textarea>
+        <textarea id="messageInput" rows="1" placeholder="应用房间后发送消息…" disabled></textarea>
         <button id="sendButton" class="send" disabled>发送</button>
       </footer>
     </main>

@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  connected: false,
+  configured: false,
   cursor: 0,
   pollTimer: null,
   polling: false,
@@ -9,12 +9,11 @@ const state = {
   totalRounds: 1,
 };
 
-const baseUrl = $('baseUrl');
-const apiKey = $('apiKey');
+const repositoryUrl = $('repositoryUrl');
 const room = $('room');
 const participantNames = $('participantNames');
 const rounds = $('rounds');
-const connectButton = $('connectButton');
+const configureButton = $('configureButton');
 const connectionStatus = $('connectionStatus');
 const liveState = $('liveState');
 const queueState = $('queueState');
@@ -28,7 +27,7 @@ const participantCount = $('participantCount');
 const joinPrompts = $('joinPrompts');
 const promptCount = $('promptCount');
 
-baseUrl.value = sessionStorage.getItem('chat-team.baseUrl') || baseUrl.value;
+repositoryUrl.value = sessionStorage.getItem('chat-team.repositoryUrl') || repositoryUrl.value;
 room.value = sessionStorage.getItem('chat-team.room') || room.value;
 participantNames.value = sessionStorage.getItem('chat-team.participants') || participantNames.value;
 rounds.value = sessionStorage.getItem('chat-team.rounds') || rounds.value;
@@ -50,15 +49,16 @@ function configuredParticipants() {
 
 function promptFor(name) {
   const roomName = room.value.trim() || 'main';
-  return `@MCPagent 你是 chat-team 房间“${roomName}”中的成员“${name}”。调用 agent_open 后持续 agent_exchange；聊天室规则会随第一条用户消息发送。除非我让你退出，否则不要在网页输出“等待/不能抢答/不是我的请求”等提示，只持续处理 MCP。`;
+  const repo = repositoryUrl.value.trim() || 'https://github.com/AAAYNMMM/chat-team';
+  return `@MCPcoding 你是 chat-team 房间“${roomName}”中的成员“${name}”。先用 coding_open 打开 ${repo} 的 main，然后持续用 coding_exec 运行 node src/member.mjs exchange ${name} ${roomName}；严格按命令返回的 submit/next 操作并继续 exchange，直到我让你退出。不要在网页输出等待或空闲提示。`;
 }
+
 function renderJoinPrompts() {
   const names = configuredParticipants();
   promptCount.textContent = String(names.length);
   joinPrompts.replaceChildren(...names.map((name) => {
     const card = document.createElement('div');
     card.className = 'prompt-card';
-
     const head = document.createElement('div');
     head.className = 'prompt-head';
     const title = document.createElement('strong');
@@ -77,23 +77,22 @@ function renderJoinPrompts() {
       }
     });
     head.append(title, button);
-
     const preview = document.createElement('div');
     preview.className = 'prompt-preview';
-    preview.textContent = `${name} · 身份绑定`;
+    preview.textContent = `${name} · MCPcoding 持久收件箱`;
     card.append(head, preview);
     return card;
   }));
 }
 
-function setConnection(connected, text, error = false) {
-  state.connected = connected;
+function setConfigured(configured, text, error = false) {
+  state.configured = configured;
   connectionStatus.textContent = text;
-  connectionStatus.className = `status ${connected ? 'online' : error ? 'error' : 'offline'}`;
-  liveState.textContent = connected ? '已连接' : '离线';
-  liveState.className = `live-state ${connected ? 'online' : ''}`;
-  messageInput.disabled = !connected;
-  sendButton.disabled = !connected;
+  connectionStatus.className = `status ${configured ? 'online' : error ? 'error' : 'offline'}`;
+  liveState.textContent = configured ? '已配置' : '未配置';
+  liveState.className = `live-state ${configured ? 'online' : ''}`;
+  messageInput.disabled = !configured;
+  sendButton.disabled = !configured;
 }
 
 function initials(name) {
@@ -109,13 +108,9 @@ function formatTime(value) {
 }
 
 function statusText(item) {
-  switch (item.status) {
-    case 'replying': return '等待该窗口回复';
-    case 'retrying': return '首次未回，正在自动补发';
-    case 'replied': return '刚刚已回复';
-    case 'error': return `异常 · ${item.error || '未返回'}`;
-    default: return '待命 · 在线状态由网页窗口决定';
-  }
+  if (item.status === 'waiting_reply') return item.online ? `在线 · 等待第 ${item.round} 轮回复` : `未在线 · 第 ${item.round} 轮待回复`;
+  if (item.online) return '在线 · 等待新任务';
+  return '离线/未轮询';
 }
 
 function renderParticipants(items = state.participants) {
@@ -123,13 +118,13 @@ function renderParticipants(items = state.participants) {
   participantCount.textContent = String(state.participants.length);
   if (!state.participants.length) {
     participants.className = 'participants empty';
-    participants.textContent = '连接后显示配置成员';
+    participants.textContent = '应用房间后显示成员';
     return;
   }
   participants.className = 'participants';
   participants.replaceChildren(...state.participants.map((item) => {
     const row = document.createElement('div');
-    row.className = `participant ${item.status === 'error' ? 'has-error' : ''}`;
+    row.className = `participant ${item.status === 'waiting_reply' && !item.online ? 'has-error' : ''}`;
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
     avatar.textContent = initials(item.name);
@@ -156,15 +151,12 @@ function appendMessage(message) {
   removeWelcome();
   const role = message.role || 'assistant';
   const sender = message.sender || (role === 'user' ? '你' : role === 'system' ? '系统' : 'Web GPT');
-
   const row = document.createElement('article');
   row.className = `message ${role}`;
   row.dataset.sequence = String(message.sequence || '');
-
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
   avatar.textContent = initials(sender);
-
   const card = document.createElement('div');
   card.className = 'message-card';
   const head = document.createElement('div');
@@ -215,71 +207,72 @@ async function api(path, init = {}) {
   return body;
 }
 
-function updateQueueState(processing, queued, activeRound = 0, totalRounds = state.totalRounds) {
-  if (processing) {
-    const roundText = activeRound ? `第 ${activeRound}/${totalRounds} 轮` : '准备讨论';
-    queueState.textContent = queued ? `${roundText} · 排队 ${queued}` : roundText;
+function updateQueueState(data = {}) {
+  if (data.processing) {
+    const round = Number(data.active_round || 0);
+    const total = Number(data.rounds || state.totalRounds || 1);
+    queueState.textContent = round ? `第 ${round}/${total} 轮` : '讨论中';
+    if (Number(data.queued_turns || 0)) queueState.textContent += ` · 排队 ${data.queued_turns}`;
     queueState.className = 'queue-state active';
   } else {
-    queueState.textContent = queued ? `等待 ${queued}` : '空闲';
+    queueState.textContent = Number(data.queued_turns || 0) ? `等待 ${data.queued_turns}` : '空闲';
     queueState.className = 'queue-state';
   }
 }
 
-async function connect() {
+function applyStatus(data) {
+  state.totalRounds = Number(data.rounds || state.totalRounds || 1);
+  renderParticipants(data.participants || []);
+  updateQueueState(data);
+  roomTitle.textContent = `# ${data.room || room.value.trim() || 'main'}`;
+  roomSubtitle.textContent = `CWapi Coding · 持久消息队列 · ${state.totalRounds} 轮`;
+}
+
+async function configure() {
   const names = configuredParticipants();
   if (!names.length) {
-    setConnection(false, '至少配置一个 Web GPT 成员', true);
+    setConfigured(false, '至少配置一个 Web GPT 成员', true);
     return;
   }
-  connectButton.disabled = true;
-  connectionStatus.textContent = '连接中…';
+  configureButton.disabled = true;
+  connectionStatus.textContent = '配置中…';
   connectionStatus.className = 'status offline';
   try {
-    const data = await api('/api/connect', {
+    const data = await api('/api/configure', {
       method: 'POST',
-      body: JSON.stringify({
-        baseUrl: baseUrl.value,
-        apiKey: apiKey.value,
-        room: room.value,
-        participants: names,
-        rounds: Number(rounds.value),
-      }),
+      body: JSON.stringify({ room: room.value, participants: names, rounds: Number(rounds.value) }),
     });
-    sessionStorage.setItem('chat-team.baseUrl', data.baseUrl);
+    sessionStorage.setItem('chat-team.repositoryUrl', repositoryUrl.value.trim());
     sessionStorage.setItem('chat-team.room', data.room);
     sessionStorage.setItem('chat-team.participants', names.join(', '));
     sessionStorage.setItem('chat-team.rounds', String(data.rounds));
-    roomTitle.textContent = `# ${data.room}`;
-    roomSubtitle.textContent = `CWapi 原版 Agent · ${data.model || 'cwapi-web-gpt'} · ${data.rounds} 轮`;
     state.cursor = 0;
-    state.totalRounds = Number(data.rounds || 1);
     messages.querySelectorAll('.message, .error-banner').forEach((node) => node.remove());
-    renderParticipants(data.participants || []);
-    setConnection(true, '连接成功');
-    updateQueueState(false, 0, 0, state.totalRounds);
+    setConfigured(true, '房间已应用');
+    applyStatus(data);
+    renderJoinPrompts();
     startPolling();
     messageInput.focus();
   } catch (error) {
-    setConnection(false, `连接失败：${error.message}`, true);
+    setConfigured(false, `配置失败：${error.message}`, true);
   } finally {
-    connectButton.disabled = false;
+    configureButton.disabled = false;
   }
 }
 
 async function pollMessages() {
-  if (!state.connected || state.polling) return;
+  if (!state.configured || state.polling) return;
   state.polling = true;
   try {
-    const data = await api(`/api/messages?after=${state.cursor}`);
-    renderParticipants(data.participants || []);
+    const roomName = encodeURIComponent(room.value.trim() || 'main');
+    const data = await api(`/api/messages?room=${roomName}&after=${state.cursor}`);
     for (const item of Array.isArray(data.messages) ? data.messages : []) {
       appendMessage(item);
       if (Number(item.sequence) > state.cursor) state.cursor = Number(item.sequence);
     }
     if (Number(data.cursor) > state.cursor) state.cursor = Number(data.cursor);
-    updateQueueState(Boolean(data.processing), Number(data.queued_turns || 0), Number(data.active_round || 0), Number(data.total_rounds || state.totalRounds));
-    connectionStatus.textContent = '连接成功';
+    applyStatus(data);
+    connectionStatus.textContent = '房间已应用';
     connectionStatus.className = 'status online';
   } catch (error) {
     connectionStatus.textContent = `同步失败：${error.message}`;
@@ -302,17 +295,20 @@ function stopPolling() {
 
 async function sendMessage() {
   const content = messageInput.value.trim();
-  if (!content || !state.connected) return;
+  if (!content || !state.configured) return;
   sendButton.disabled = true;
   try {
-    await api('/api/messages', { method: 'POST', body: JSON.stringify({ content }) });
+    await api('/api/messages', {
+      method: 'POST',
+      body: JSON.stringify({ room: room.value.trim() || 'main', content }),
+    });
     messageInput.value = '';
     resizeComposer();
     await pollMessages();
   } catch (error) {
     showError(`发送失败：${error.message}`);
   } finally {
-    sendButton.disabled = !state.connected;
+    sendButton.disabled = !state.configured;
     messageInput.focus();
   }
 }
@@ -322,8 +318,26 @@ function resizeComposer() {
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 160)}px`;
 }
 
-connectButton.addEventListener('click', connect);
+async function attachExistingRoom() {
+  try {
+    const roomName = encodeURIComponent(room.value.trim() || 'main');
+    const data = await api(`/api/status?room=${roomName}`);
+    if (!data.configured) {
+      setConfigured(false, '未配置');
+      renderParticipants([]);
+      return;
+    }
+    setConfigured(true, '房间已存在');
+    applyStatus(data);
+    startPolling();
+  } catch {
+    setConfigured(false, '未配置');
+  }
+}
+
+configureButton.addEventListener('click', configure);
 room.addEventListener('input', renderJoinPrompts);
+repositoryUrl.addEventListener('input', renderJoinPrompts);
 participantNames.addEventListener('input', renderJoinPrompts);
 sendButton.addEventListener('click', sendMessage);
 messageInput.addEventListener('input', resizeComposer);
@@ -335,5 +349,6 @@ messageInput.addEventListener('keydown', (event) => {
 });
 window.addEventListener('beforeunload', stopPolling);
 
-setConnection(false, '未连接');
+setConfigured(false, '未配置');
 renderParticipants([]);
+void attachExistingRoom();

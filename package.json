@@ -1,15 +1,15 @@
 {
-  "name": "chat-team",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Local multi-Web-GPT chat room for CWapi Agent mode",
-  "scripts": {
-    "start": "node src/server.mjs",
-    "check": "node --check src/server.mjs && node --check public/app.js",
-    "test": "node --test"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+    "name":  "chat-team",
+    "version":  "0.1.0",
+    "private":  true,
+    "type":  "module",
+    "description":  "Local multi-Web-GPT chat room for CWapi Coding mode",
+    "scripts":  {
+                    "start":  "node src/server.mjs",
+                    "check":  "node --check src/server.mjs \u0026\u0026 node --check src/member.mjs \u0026\u0026 node --check public/app.js",
+                    "test":  "node --test"
+                },
+    "engines":  {
+                    "node":  "\u003e=20"
+                }
 }

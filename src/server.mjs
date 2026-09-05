@@ -6,44 +6,25 @@ import { fileURLToPath } from 'node:url';
 const host = '127.0.0.1';
 const port = Number(process.env.CHAT_TEAM_PORT || 32324);
 const root = fileURLToPath(new URL('../public/', import.meta.url));
-const broadcastHoldMs = clampInt(process.env.CHAT_TEAM_BROADCAST_MS, 4000, 500, 12000);
-const broadcastSettleMs = clampInt(process.env.CHAT_TEAM_BROADCAST_SETTLE_MS, 600, 0, 3000);
-const controlTimeoutMs = clampInt(process.env.CHAT_TEAM_CONTROL_TIMEOUT_MS, 45000, 5000, 180000);
+const assignmentTimeoutMs = clampInt(process.env.CHAT_TEAM_ASSIGNMENT_TIMEOUT_MS, 180000, 30000, 600000);
+const memberOnlineMs = clampInt(process.env.CHAT_TEAM_MEMBER_ONLINE_MS, 90000, 10000, 600000);
+const maxParticipants = 8;
+const maxRounds = 6;
 const maxMessageBytes = 20 * 1024;
-const maxParticipants = 4;
-const maxRounds = 3;
-const skipToken = '[[SKIP]]';
-
-let connection = {
-  baseUrl: 'http://127.0.0.1:32123/v1',
-  apiKey: '',
-  room: 'main',
-  model: 'cwapi-web-gpt',
-  connected: false,
-};
-
-let settings = {
-  participants: ['GPT-A', 'GPT-B', 'GPT-C'],
-  rounds: 1,
-};
-
-const chat = {
-  sequence: 0,
-  turnCounter: 0,
-  messages: [],
-  queue: [],
-  processing: false,
-  participantStates: new Map(),
-  rulesSent: false,
-};
-
-const activeControllers = new Set();
+const rooms = new Map();
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 
 function clampInt(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function codedError(code, message = code, status = 400) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
 }
 
 function sendJson(res, status, value) {
@@ -67,26 +48,16 @@ async function readJson(req) {
   }
 }
 
-function codedError(code, message = code, status = 400) {
-  const error = new Error(message);
-  error.code = code;
-  error.status = status;
-  return error;
-}
-
-function normalizeBaseUrl(value) {
-  const raw = String(value || '').trim().replace(/\/+$/, '');
-  const url = new URL(raw);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw codedError('INVALID_PROTOCOL');
-  if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) throw codedError('CWAPI_MUST_BE_LOCAL');
-  if (!url.pathname.endsWith('/v1')) url.pathname = `${url.pathname.replace(/\/+$/, '')}/v1`;
-  return url.toString().replace(/\/$/, '');
-}
-
 function normalizeRoom(value) {
   const room = String(value || 'main').trim() || 'main';
   if (room.length > 64 || /[\\/\r\n]/.test(room)) throw codedError('ROOM_INVALID');
   return room;
+}
+
+function normalizeMember(value) {
+  const name = String(value || '').trim();
+  if (!name || name.length > 64 || /[\r\n]/.test(name)) throw codedError('MEMBER_INVALID');
+  return name;
 }
 
 function normalizeParticipants(value) {
@@ -94,48 +65,90 @@ function normalizeParticipants(value) {
   const seen = new Set();
   const result = [];
   for (const item of source) {
-    const name = String(item || '').trim();
-    if (!name) continue;
-    if (name.length > 64 || /[\r\n]/.test(name)) throw codedError('PARTICIPANT_NAME_INVALID');
+    const name = normalizeMember(item);
     const key = name.toLocaleLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(name);
   }
   if (!result.length) throw codedError('PARTICIPANTS_REQUIRED');
-  if (result.length > maxParticipants) throw codedError('PARTICIPANT_LIMIT');
+  if (result.length > maxParticipants) throw codedError('PARTICIPANT_LIMIT', `最多 ${maxParticipants} 个成员`);
   return result;
 }
 
 function normalizeRounds(value) {
   const rounds = Number(value);
-  if (!Number.isInteger(rounds) || rounds < 1 || rounds > maxRounds) throw codedError('ROUNDS_INVALID');
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > maxRounds) {
+    throw codedError('ROUNDS_INVALID', `轮数必须为 1-${maxRounds}`);
+  }
   return rounds;
 }
 
-function resetParticipantStates() {
-  chat.participantStates.clear();
-  for (const name of settings.participants) {
-    chat.participantStates.set(name, { name, status: 'ready', error: '', lastReplyAt: '' });
-  }
-}
-
-function participantSnapshot() {
-  return settings.participants.map((name) => ({
+function createRoom(name, participants = ['GPT-A', 'GPT-B', 'GPT-C'], rounds = 1) {
+  return {
     name,
-    ...(chat.participantStates.get(name) || { status: 'ready', error: '', lastReplyAt: '' }),
-  }));
+    participants: [...participants],
+    rounds,
+    generation: 1,
+    sequence: 0,
+    turnCounter: 0,
+    assignmentCounter: 0,
+    messages: [],
+    turnQueue: [],
+    activeTurn: null,
+    assignments: new Map(),
+    members: new Map(),
+    version: 0,
+    waiters: new Set(),
+  };
 }
 
-function setParticipantState(name, patch) {
-  const current = chat.participantStates.get(name) || { name, status: 'ready', error: '', lastReplyAt: '' };
-  chat.participantStates.set(name, { ...current, ...patch, name });
+function getRoom(name, create = false) {
+  const normalized = normalizeRoom(name);
+  let room = rooms.get(normalized);
+  if (!room && create) {
+    room = createRoom(normalized);
+    rooms.set(normalized, room);
+  }
+  if (!room) throw codedError('ROOM_NOT_FOUND', `房间 ${normalized} 尚未配置`, 404);
+  return room;
 }
 
-function appendMessage({ role, sender, content, turnId = '', round = 0 }) {
-  chat.sequence += 1;
+function signalRoom(room) {
+  room.version += 1;
+  for (const waiter of [...room.waiters]) waiter();
+}
+
+function waitForRoomChange(room, version, waitMs) {
+  if (room.version !== version || waitMs <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      room.waiters.delete(finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, waitMs);
+    room.waiters.add(finish);
+    if (room.version !== version) finish();
+  });
+}
+
+function memberState(room, name) {
+  let state = room.members.get(name);
+  if (!state) {
+    state = { name, cursor: 0, lastSeenAt: 0, lastReplyAt: 0 };
+    room.members.set(name, state);
+  }
+  return state;
+}
+
+function appendMessage(room, { role, sender, content, turnId = '', round = 0 }) {
+  room.sequence += 1;
   const message = {
-    sequence: chat.sequence,
+    sequence: room.sequence,
     role,
     sender,
     content,
@@ -143,399 +156,291 @@ function appendMessage({ role, sender, content, turnId = '', round = 0 }) {
     round,
     created_at: new Date().toISOString(),
   };
-  chat.messages.push(message);
-  if (chat.messages.length > 1000) chat.messages.splice(0, chat.messages.length - 1000);
+  room.messages.push(message);
+  if (room.messages.length > 2000) room.messages.splice(0, room.messages.length - 2000);
+  signalRoom(room);
   return message;
 }
 
-function abortAllRequests() {
-  for (const controller of activeControllers) controller.abort();
-  activeControllers.clear();
+function participantSnapshot(room) {
+  const now = Date.now();
+  const activeAssignments = new Map();
+  if (room.activeTurn) {
+    for (const assignment of room.assignments.values()) {
+      if (assignment.turnId === room.activeTurn.id && assignment.round === room.activeTurn.currentRound && assignment.status === 'pending') {
+        activeAssignments.set(assignment.member, assignment);
+      }
+    }
+  }
+  return room.participants.map((name) => {
+    const state = room.members.get(name);
+    const assignment = activeAssignments.get(name);
+    return {
+      name,
+      online: Boolean(state?.lastSeenAt && now - state.lastSeenAt <= memberOnlineMs),
+      last_seen_at: state?.lastSeenAt ? new Date(state.lastSeenAt).toISOString() : '',
+      last_reply_at: state?.lastReplyAt ? new Date(state.lastReplyAt).toISOString() : '',
+      status: assignment ? 'waiting_reply' : 'ready',
+      round: assignment?.round || 0,
+    };
+  });
 }
 
-async function cwapi(path, init = {}) {
-  if (!connection.apiKey) throw codedError('NOT_CONNECTED', '尚未连接 CWapi', 503);
-  const headers = new Headers(init.headers || {});
-  headers.set('authorization', `Bearer ${connection.apiKey}`);
-  if (init.body != null && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  let response;
-  try {
-    response = await fetch(`${connection.baseUrl}${path}`, { ...init, headers });
-  } catch (error) {
-    if (error?.name === 'AbortError') throw error;
-    throw codedError('CWAPI_UNREACHABLE', error?.message || 'CWapi unreachable', 502);
-  }
-  const text = await response.text();
-  let body = null;
-  try { body = text ? JSON.parse(text) : null; } catch { body = { message: text }; }
-  if (!response.ok) {
-    const code = body?.error?.code || body?.code || body?.error || `CWAPI_HTTP_${response.status}`;
-    const message = body?.error?.message || body?.message || String(code);
-    throw codedError(String(code), message, response.status);
-  }
-  return body;
+function currentAssignments(room) {
+  if (!room.activeTurn) return [];
+  return [...room.assignments.values()].filter((item) =>
+    item.turnId === room.activeTurn.id && item.round === room.activeTurn.currentRound,
+  );
 }
 
-function chatCompletionBody(messages, metadata) {
+function findPendingAssignment(room, member) {
+  if (!room.activeTurn) return null;
+  return currentAssignments(room).find((item) => item.member === member && item.status === 'pending') || null;
+}
+
+function startRound(room, turn, round) {
+  turn.currentRound = round;
+  for (const member of room.participants) {
+    room.assignmentCounter += 1;
+    const id = `${turn.id}-r${round}-a${room.assignmentCounter}`;
+    room.assignments.set(id, {
+      id,
+      turnId: turn.id,
+      member,
+      round,
+      totalRounds: turn.rounds,
+      status: 'pending',
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + assignmentTimeoutMs,
+      completedAt: 0,
+    });
+  }
+  signalRoom(room);
+}
+
+function startNextTurn(room) {
+  if (room.activeTurn || !room.turnQueue.length) return;
+  const turn = room.turnQueue.shift();
+  turn.status = 'active';
+  room.activeTurn = turn;
+  startRound(room, turn, 1);
+}
+
+function maybeAdvance(room) {
+  const turn = room.activeTurn;
+  if (!turn) {
+    startNextTurn(room);
+    return;
+  }
+  const assignments = currentAssignments(room);
+  if (!assignments.length || assignments.some((item) => item.status === 'pending')) return;
+  if (turn.currentRound < turn.rounds) {
+    startRound(room, turn, turn.currentRound + 1);
+    return;
+  }
+  turn.status = 'completed';
+  turn.completedAt = Date.now();
+  room.activeTurn = null;
+  signalRoom(room);
+  startNextTurn(room);
+}
+
+function expireAssignments(room) {
+  if (!room.activeTurn) return;
+  const now = Date.now();
+  let changed = false;
+  for (const assignment of currentAssignments(room)) {
+    if (assignment.status !== 'pending' || assignment.deadlineAt > now) continue;
+    assignment.status = 'timed_out';
+    assignment.completedAt = now;
+    appendMessage(room, {
+      role: 'system',
+      sender: '系统',
+      content: `${assignment.member} 第 ${assignment.round}/${assignment.totalRounds} 轮等待超时，继续后续讨论。`,
+      turnId: assignment.turnId,
+      round: assignment.round,
+    });
+    changed = true;
+  }
+  if (changed) maybeAdvance(room);
+}
+
+function submitMemberReply(room, member, response) {
+  const assignmentId = String(response?.assignment_id || '').trim();
+  const content = String(response?.content || '').trim();
+  if (!assignmentId) throw codedError('ASSIGNMENT_REQUIRED');
+  if (!content) throw codedError('REPLY_REQUIRED');
+  if (Buffer.byteLength(content, 'utf8') > maxMessageBytes) throw codedError('MESSAGE_TOO_LONG');
+  const assignment = room.assignments.get(assignmentId);
+  if (!assignment) throw codedError('ASSIGNMENT_NOT_FOUND', '任务已不存在', 404);
+  if (assignment.member !== member) throw codedError('ASSIGNMENT_MEMBER_MISMATCH', '该任务不属于当前成员', 403);
+  const state = memberState(room, member);
+  state.lastSeenAt = Date.now();
+  if (assignment.status === 'completed') {
+    return { duplicate: true, assignment };
+  }
+  if (assignment.status !== 'pending') throw codedError('ASSIGNMENT_CLOSED', `任务状态为 ${assignment.status}`, 409);
+  assignment.status = 'completed';
+  assignment.completedAt = Date.now();
+  const message = appendMessage(room, {
+    role: 'assistant',
+    sender: member,
+    content,
+    turnId: assignment.turnId,
+    round: assignment.round,
+  });
+  state.lastReplyAt = Date.now();
+  maybeAdvance(room);
+  return { duplicate: false, assignment, message };
+}
+
+function assignmentPayload(room, member, assignment) {
+  const state = memberState(room, member);
+  const unread = room.messages.filter((item) => item.sequence > state.cursor);
+  state.cursor = room.sequence;
+  state.lastSeenAt = Date.now();
   return {
-    model: connection.model || 'cwapi-web-gpt',
-    stream: false,
-    messages,
-    metadata,
+    state: 'assignment',
+    room: room.name,
+    member,
+    assignment: {
+      id: assignment.id,
+      turn_id: assignment.turnId,
+      round: assignment.round,
+      total_rounds: assignment.totalRounds,
+      deadline_at: new Date(assignment.deadlineAt).toISOString(),
+    },
+    messages: unread,
+    instruction: assignment.round === 1
+      ? '根据 messages 中的用户问题给出你的独立回答。'
+      : '结合 messages 中新增的其他成员回复继续讨论，回应、补充或质疑，避免机械重复上一轮。',
+    submit: {
+      command: 'node',
+      argv: ['src/member.mjs', 'exchange', member, room.name, assignment.id, '<你的聊天室回复>'],
+    },
+    next_action: '提交回复后继续执行 exchange；不要在网页输出等待提示。',
   };
 }
 
-function teamRulesText() {
-  return `chat-team 多人聊天室规则（仅在本次连接的第一条用户广播发送一次，后续持续遵守）：
-1. 你的成员身份由网页启动提示词固定，不要自行改名。当前房间：${connection.room}；成员：${settings.participants.join(', ')}。
-2. 每次 agent_exchange 返回的 request 都要独立查看 metadata。
-3. chat_team_kind=broadcast：这是所有成员共享的聊天消息。只读取并记住正文，不得对该 request 提交 completion、tool_call、progress 或其他 response；直接继续 agent_exchange。该 request 稍后被本地客户端主动取消是正常行为。
-4. chat_team_kind=control：只有 chat_team_target 完全等于你的成员身份时才处理。其他 target 属于别的 Web GPT，不得提交 response，也不要在网页输出“等待”“不能抢答”“不是我的请求”等提示；直接继续 agent_exchange。
-5. 处理属于你的 control 时，结合此前收到的所有 broadcast 正常参与讨论，并通过 agent_exchange.responses 对该 control 的准确 request_id 提交 completion。不要只在网页里输出而不回传 MCP。
-6. 用户选择几轮，就代表每个成员每轮都要实际发言。不要返回 [[SKIP]]。第 1 轮直接回答用户；第 2 轮起回应、质疑或补充其他成员观点，避免机械重复自己上一轮内容。
-7. delivery>1 是同一个 request 的重投，不是新聊天消息。完成自己的 control 后立即继续 agent_exchange；不要调用 agent_close，除非用户明确让你退出聊天室。`;
-}
-
-function broadcastBody({ turnId, sender, content, round, kind, includeRules = false }) {
-  const senderLabel = sender === 'user' ? '用户' : sender;
-  const messages = [];
-  if (includeRules) {
-    messages.push({ role: 'system', content: teamRulesText() });
+async function memberExchange(room, member, response, waitMs) {
+  if (!room.participants.some((item) => item.toLocaleLowerCase() === member.toLocaleLowerCase())) {
+    throw codedError('MEMBER_NOT_CONFIGURED', `${member} 不在房间成员列表中`, 403);
   }
-  messages.push({
-    role: 'user',
-    content: `[chat-team broadcast]\n发送者：${senderLabel}\n内容：${content}`,
-  });
-  return chatCompletionBody(messages, {
-    chat_team: true,
-    chat_team_protocol: 'broadcast-control-v2',
-    chat_team_kind: 'broadcast',
-    chat_team_message_kind: kind,
-    chat_team_room: connection.room,
-    chat_team_turn: turnId,
-    chat_team_sender: sender,
-    chat_team_round: round,
-    chat_team_rules: includeRules ? 'included' : 'remembered',
-  });
-}
+  const canonical = room.participants.find((item) => item.toLocaleLowerCase() === member.toLocaleLowerCase());
+  const state = memberState(room, canonical);
+  state.lastSeenAt = Date.now();
+  if (response) submitMemberReply(room, canonical, response);
+  expireAssignments(room);
 
-function controlBody({ turnId, target, round, recovery = false }) {
-  const phase = round === 1
-    ? '这是第一轮：直接回答用户的问题，给出你自己的判断。'
-    : '这是后续轮次：结合上一轮共享回复，回应、质疑或补充其他成员观点，并提供至少一个新的信息点。';
-  const recoveryNote = recovery
-    ? '这是补发控制：你上一请求未产生可用聊天室发言。请这次务必提交实际回复，不要返回 [[SKIP]]。'
-    : '';
-  return chatCompletionBody([
-    {
-      role: 'user',
-      content: `chat-team control：target=${target}，第 ${round}/${settings.rounds} 轮。${phase}${recoveryNote}\n若你在本网页窗口绑定的成员身份就是 ${target}：请对本 request 的准确 request_id 通过 agent_exchange.responses 提交 completion，只返回要显示在聊天室里的正文，然后立即继续 agent_exchange。不得返回 [[SKIP]]。\n若你的身份不是 ${target}：不要提交任何 response，也不要在网页输出“等待/不能抢答/不是我的请求”等提示，直接继续 agent_exchange。`,
-    },
-  ], {
-    chat_team: true,
-    chat_team_protocol: 'broadcast-control-v2',
-    chat_team_kind: 'control',
-    chat_team_room: connection.room,
-    chat_team_turn: turnId,
-    chat_team_target: target,
-    chat_team_round: round,
-    chat_team_attempt: recovery ? 2 : 1,
-    chat_team_recovery: recovery,
-  });
-}
-async function postCompletion(body, signal) {
-  return cwapi('/chat/completions', {
-    method: 'POST',
-    body: JSON.stringify(body),
-    signal,
-  });
-}
-
-function extractCompletionText(payload) {
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content === 'string') return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => typeof part === 'string' ? part : part?.text || '')
-      .join('')
-      .trim();
-  }
-  if (typeof payload?.content === 'string') return payload.content.trim();
-  return '';
-}
-
-async function broadcastSharedMessage(message) {
-  const deadline = Date.now() + broadcastHoldMs;
-  let attempts = 0;
-  while (connection.connected && Date.now() < deadline && attempts < 8) {
-    attempts += 1;
-    const controller = new AbortController();
-    activeControllers.add(controller);
-    const remaining = Math.max(1, deadline - Date.now());
-    const timer = setTimeout(() => controller.abort(), remaining);
-    try {
-      await postCompletion(broadcastBody(message), controller.signal);
-      // A broadcast should stay open. If a window incorrectly completes it,
-      // immediately re-publish for the remaining hold window.
-    } catch (error) {
-      if (error?.name !== 'AbortError') throw error;
-    } finally {
-      clearTimeout(timer);
-      activeControllers.delete(controller);
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    expireAssignments(room);
+    const assignment = findPendingAssignment(room, canonical);
+    if (assignment) return assignmentPayload(room, canonical, assignment);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      state.lastSeenAt = Date.now();
+      return {
+        state: 'idle',
+        room: room.name,
+        member: canonical,
+        next: { command: 'node', argv: ['src/member.mjs', 'exchange', canonical, room.name] },
+        next_action: '立即继续执行同一 exchange 命令等待新任务；不要在网页输出等待/空闲提示。',
+      };
     }
+    const version = room.version;
+    await waitForRoomChange(room, version, Math.min(remaining, 15000));
   }
 }
 
-async function askParticipant({ turnId, target, round, recovery = false }) {
-  const controller = new AbortController();
-  activeControllers.add(controller);
-  const timer = setTimeout(() => controller.abort(), controlTimeoutMs);
-  try {
-    const payload = await postCompletion(controlBody({ turnId, target, round, recovery }), controller.signal);
-    return extractCompletionText(payload);
-  } catch (error) {
-    if (error?.name === 'AbortError') throw codedError('PARTICIPANT_TIMEOUT', `${target} 等待超时`, 504);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    activeControllers.delete(controller);
+function configureRoom(name, participants, rounds) {
+  const existing = rooms.get(name);
+  if (existing) {
+    for (const waiter of [...existing.waiters]) waiter();
   }
+  const room = createRoom(name, participants, rounds);
+  rooms.set(name, room);
+  signalRoom(room);
+  return room;
 }
 
-function needsRecovery(result) {
-  if (!result || result.error) return true;
-  const reply = String(result.reply || '').trim();
-  return !reply || reply === skipToken;
-}
-
-async function runControlBatch({ turnId, round, targets, recovery = false }) {
-  return Promise.all(targets.map(async (target) => {
-    try {
-      const reply = await askParticipant({ turnId, target, round, recovery });
-      return { target, reply, recovery };
-    } catch (error) {
-      return { target, error, recovery };
-    }
-  }));
-}
-
-function sleep(ms) {
-  if (!ms) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function processTurn(turn) {
-  chat.activeTurn = turn.id;
-  chat.activeRound = 0;
-  const includeRules = !chat.rulesSent;
-  await broadcastSharedMessage({
-    turnId: turn.id,
-    sender: 'user',
-    content: turn.content,
-    round: 0,
-    kind: 'user',
-    includeRules,
-  });
-  if (includeRules) chat.rulesSent = true;
-
-  for (let round = 1; round <= settings.rounds && connection.connected; round += 1) {
-    chat.activeRound = round;
-    for (const target of settings.participants) {
-      setParticipantState(target, { status: 'replying', error: '' });
-    }
-
-    let results = await runControlBatch({
-      turnId: turn.id,
-      round,
-      targets: settings.participants,
-      recovery: false,
-    });
-
-    if (!connection.connected) return;
-    const retryTargets = results.filter(needsRecovery).map((item) => item.target);
-    if (retryTargets.length) {
-      for (const target of retryTargets) {
-        setParticipantState(target, { status: 'retrying', error: '' });
-      }
-      const retries = await runControlBatch({
-        turnId: turn.id,
-        round,
-        targets: retryTargets,
-        recovery: true,
-      });
-      const retryMap = new Map(retries.map((item) => [item.target, item]));
-      results = results.map((item) => needsRecovery(item) ? (retryMap.get(item.target) || item) : item);
-    }
-
-    if (!connection.connected) return;
-    const peerReplies = [];
-    for (const result of results) {
-      const { target } = result;
-      if (needsRecovery(result)) {
-        const code = result.error?.code || result.error?.message || 'PARTICIPANT_NO_REPLY';
-        setParticipantState(target, { status: 'error', error: String(code) });
-        appendMessage({
-          role: 'system',
-          sender: '系统',
-          content: `${target} 第 ${round}/${settings.rounds} 轮两次尝试均未返回可用发言：${code}`,
-          turnId: turn.id,
-          round,
-        });
-        continue;
-      }
-      const reply = String(result.reply).trim();
-      const message = appendMessage({ role: 'assistant', sender: target, content: reply, turnId: turn.id, round });
-      setParticipantState(target, { status: 'replied', error: '', lastReplyAt: message.created_at });
-      peerReplies.push({ target, reply, createdAt: message.created_at });
-    }
-
-    if (peerReplies.length && connection.connected) {
-      await sleep(broadcastSettleMs);
-      await broadcastSharedMessage({
-        turnId: turn.id,
-        sender: `第 ${round} 轮成员回复`,
-        content: peerReplies.map((item) => `${item.target}：${item.reply}`).join('\n\n'),
-        round,
-        kind: 'peer_batch',
-      });
-    }
-
-    for (const item of peerReplies) {
-      setParticipantState(item.target, { status: 'ready', error: '', lastReplyAt: item.createdAt });
-    }
-  }
-  chat.activeRound = 0;
-  chat.activeTurn = '';
-}
-async function pumpQueue() {
-  if (chat.processing) return;
-  chat.processing = true;
-  try {
-    while (chat.queue.length && connection.connected) {
-      const turn = chat.queue.shift();
-      try {
-        await processTurn(turn);
-      } catch (error) {
-        appendMessage({
-          role: 'system',
-          sender: '系统',
-          content: `讨论中断：${error?.code || error?.message || 'UNKNOWN_ERROR'}`,
-          turnId: turn.id,
-        });
-      }
-    }
-  } finally {
-    chat.processing = false;
-    chat.activeRound = 0;
-    chat.activeTurn = '';
-  }
-}
-
-function resetChat() {
-  abortAllRequests();
-  chat.sequence = 0;
-  chat.turnCounter = 0;
-  chat.messages = [];
-  chat.queue = [];
-  chat.processing = false;
-  chat.rulesSent = false;
-  chat.activeRound = 0;
-  chat.activeTurn = '';
-  resetParticipantStates();
+function roomStatus(room) {
+  expireAssignments(room);
+  return {
+    configured: true,
+    room: room.name,
+    participants: participantSnapshot(room),
+    rounds: room.rounds,
+    processing: Boolean(room.activeTurn),
+    active_turn: room.activeTurn?.id || '',
+    active_round: room.activeTurn?.currentRound || 0,
+    queued_turns: room.turnQueue.length,
+    cursor: room.sequence,
+    assignment_timeout_ms: assignmentTimeoutMs,
+  };
 }
 
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/status') {
-    return sendJson(res, 200, {
-      connected: connection.connected,
-      baseUrl: connection.baseUrl,
-      room: connection.room,
-      model: connection.model,
-      participants: participantSnapshot(),
-      rounds: settings.rounds,
-      processing: chat.processing,
-      queued_turns: chat.queue.length,
-      active_round: chat.activeRound,
-      total_rounds: settings.rounds,
-      active_turn: chat.activeTurn,
-      broadcast_hold_ms: broadcastHoldMs,
-      broadcast_settle_ms: broadcastSettleMs,
-    });
+    const name = normalizeRoom(url.searchParams.get('room') || 'main');
+    const room = rooms.get(name);
+    if (!room) return sendJson(res, 200, { configured: false, room: name });
+    return sendJson(res, 200, roomStatus(room));
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/connect') {
+  if (req.method === 'POST' && url.pathname === '/api/configure') {
     try {
       const body = await readJson(req);
-      const next = {
-        baseUrl: normalizeBaseUrl(body.baseUrl),
-        apiKey: String(body.apiKey || '').trim(),
-        room: normalizeRoom(body.room),
-      };
-      if (!next.apiKey) throw codedError('API_KEY_REQUIRED');
-      const nextParticipants = normalizeParticipants(body.participants || settings.participants);
-      const nextRounds = normalizeRounds(body.rounds ?? settings.rounds);
-
-      const previous = connection;
-      connection = { ...connection, ...next, connected: false };
-      try {
-        const models = await cwapi('/models', { method: 'GET' });
-        const modelIds = Array.isArray(models?.data) ? models.data.map((item) => item?.id).filter(Boolean) : [];
-        connection.model = modelIds.includes('cwapi-web-gpt') ? 'cwapi-web-gpt' : (modelIds[0] || 'cwapi-web-gpt');
-        connection.connected = true;
-        settings = { participants: nextParticipants, rounds: nextRounds };
-        resetChat();
-        return sendJson(res, 200, {
-          connected: true,
-          baseUrl: connection.baseUrl,
-          room: connection.room,
-          model: connection.model,
-          models: modelIds,
-          participants: participantSnapshot(),
-          rounds: settings.rounds,
-        });
-      } catch (error) {
-        connection = previous;
-        throw error;
-      }
+      const name = normalizeRoom(body.room);
+      const participants = normalizeParticipants(body.participants || ['GPT-A', 'GPT-B', 'GPT-C']);
+      const rounds = normalizeRounds(body.rounds ?? 1);
+      const room = configureRoom(name, participants, rounds);
+      return sendJson(res, 200, roomStatus(room));
     } catch (error) {
       return sendJson(res, error.status || 400, { error: error.code || error.message, message: error.message });
     }
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/disconnect') {
-    connection = { ...connection, apiKey: '', connected: false };
-    abortAllRequests();
-    chat.queue = [];
-    return sendJson(res, 200, { connected: false });
-  }
-
   if (req.method === 'GET' && url.pathname === '/api/messages') {
-    const after = Math.max(0, Number(url.searchParams.get('after') || 0));
-    return sendJson(res, 200, {
-      cursor: chat.sequence,
-      messages: chat.messages.filter((item) => item.sequence > after),
-      participants: participantSnapshot(),
-      processing: chat.processing,
-      queued_turns: chat.queue.length,
-      active_round: chat.activeRound,
-      total_rounds: settings.rounds,
-      active_turn: chat.activeTurn,
-    });
+    try {
+      const room = getRoom(url.searchParams.get('room') || 'main');
+      expireAssignments(room);
+      const after = Math.max(0, Number(url.searchParams.get('after') || 0));
+      return sendJson(res, 200, {
+        ...roomStatus(room),
+        messages: room.messages.filter((item) => item.sequence > after),
+      });
+    } catch (error) {
+      return sendJson(res, error.status || 400, { error: error.code || error.message, message: error.message });
+    }
   }
 
   if (req.method === 'POST' && url.pathname === '/api/messages') {
     try {
-      if (!connection.connected) throw codedError('NOT_CONNECTED', '请先连接 CWapi', 503);
       const body = await readJson(req);
+      const room = getRoom(body.room || 'main');
       const content = String(body.content || '').trim();
       if (!content) throw codedError('MESSAGE_REQUIRED');
       if (Buffer.byteLength(content, 'utf8') > maxMessageBytes) throw codedError('MESSAGE_TOO_LONG');
-      chat.turnCounter += 1;
-      const turnId = `turn-${chat.turnCounter}`;
-      const message = appendMessage({ role: 'user', sender: '你', content, turnId });
-      chat.queue.push({ id: turnId, content });
-      void pumpQueue();
-      return sendJson(res, 202, { accepted: true, turn_id: turnId, message });
+      room.turnCounter += 1;
+      const turnId = `turn-${room.turnCounter}`;
+      const message = appendMessage(room, { role: 'user', sender: '你', content, turnId, round: 0 });
+      room.turnQueue.push({ id: turnId, rounds: room.rounds, status: 'queued', currentRound: 0, createdAt: Date.now() });
+      startNextTurn(room);
+      return sendJson(res, 202, { accepted: true, turn_id: turnId, message, ...roomStatus(room) });
+    } catch (error) {
+      return sendJson(res, error.status || 400, { error: error.code || error.message, message: error.message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/member/exchange') {
+    try {
+      const body = await readJson(req);
+      const room = getRoom(body.room || 'main');
+      const member = normalizeMember(body.member);
+      const waitMs = clampInt(body.wait_ms, 45000, 0, 120000);
+      const data = await memberExchange(room, member, body.response || null, waitMs);
+      return sendJson(res, 200, data);
     } catch (error) {
       return sendJson(res, error.status || 400, { error: error.code || error.message, message: error.message });
     }
@@ -575,7 +480,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+setInterval(() => {
+  for (const room of rooms.values()) expireAssignments(room);
+}, 2000).unref();
+
 server.listen(port, host, () => {
-  console.log(`chat-team listening on http://${host}:${port}`);
-  console.log(`broadcast hold ${broadcastHoldMs}ms, participant timeout ${controlTimeoutMs}ms`);
+  console.log(`chat-team coding room listening on http://${host}:${port}`);
+  console.log(`assignment timeout ${assignmentTimeoutMs}ms`);
 });

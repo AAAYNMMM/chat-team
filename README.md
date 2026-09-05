@@ -1,70 +1,55 @@
 # chat-team
 
-`chat-team` 是一个连接 **原版 CWapi 2.0.5 Agent 模式** 的本地多人聊天室。一个本地用户可以同时与多个连接到同一个 Agent MCP 的 Web GPT 窗口讨论。
+本地多人 Web GPT 聊天室，使用 **CWapi Coding 模式 / MCPcoding** 让多个 Web GPT 网页窗口参与同一场讨论。
 
-CWapi **不需要任何修改**。项目只使用 CWapi 已有接口：
+## 设计目标
 
-```text
-GET  /v1/models
-POST /v1/chat/completions
+- 一个本地用户 + 多个 Web GPT 窗口；
+- 不修改 CWapi；
+- 不依赖 Agent `completion` 生命周期；
+- 不依赖短时 broadcast 被所有窗口“刚好看到”；
+- 每条聊天消息在 chat-team 中只保存一份；
+- 每个 Web GPT 成员拥有独立读取 cursor，晚到或暂停后仍能继续读取未读消息；
+- 支持多轮讨论。
 
-agent_open
-agent_exchange
-```
-
-## 工作方式
-
-```text
-                         ┌─ Web GPT A
-                         ├─ Web GPT B
-chat-team -> CWapi 2.0.5├─ Web GPT C
-                         └─ ...
-```
-
-核心不是把完整聊天记录重复发送给每个模型，而是把请求分成两类：
-
-### 1. 共享正文广播
-
-用户或某个 Web GPT 的真实聊天正文只通过 CWapi 发送一次。
+## 架构
 
 ```text
-用户：这个设计怎么样？
-        ↓
-一个 broadcast request
-        ↓
-GPT-A / GPT-B / GPT-C 都能从同一个 Agent MCP 读到
+本地用户 / 浏览器
+        │
+        ▼
+  chat-team :32324
+        │
+        ├── 房间消息日志
+        ├── 每成员 cursor
+        ├── round / assignment 调度
+        │
+        ├──── GPT-A Web 窗口
+        │      MCPcoding -> coding_exec -> src/member.mjs
+        ├──── GPT-B Web 窗口
+        │      MCPcoding -> coding_exec -> src/member.mjs
+        └──── GPT-C Web 窗口
+               MCPcoding -> coding_exec -> src/member.mjs
 ```
 
-broadcast request 会保持一小段时间，让所有正在 `agent_exchange` 的网页窗口读取。它**不允许 completion**。广播窗口结束后，chat-team 主动取消这个 HTTP request；CWapi 会按原有客户端断开逻辑回收它。
+CWapi Coding 模式仍然按仓库维护 durable workspace，但 chat-team **不依赖 workspace 来区分成员身份**。GPT-A / GPT-B / GPT-C 的身份由 `member.mjs exchange` 参数决定，因此多个网页窗口可以共享同一个 chat-team 仓库工作区而不互相抢任务。
 
-### 2. 同轮并发控制请求
+## 为什么改用 Coding 模式
 
-chat-team 在每一轮把所有成员的 control **同时发出**：
+Agent 模式天然围绕一个 OpenAI request 的最终 completion 工作。把它硬改成多人聊天室会遇到：
+
+- 某个窗口错过短时 broadcast；
+- 非目标 control 反复投递导致窗口停止持续等待；
+- completion / request 生命周期与聊天室生命周期不一致；
+- 没有“某成员已收到某条广播”的可靠回执。
+
+Coding 版改成由 chat-team 自己维护持久消息队列。成员主动调用一个本地 CLI：
 
 ```text
-control -> target=GPT-A ┐
-control -> target=GPT-B ├─ 同时在 flight
-control -> target=GPT-C ┘
+node src/member.mjs exchange GPT-A main
 ```
 
-原版 CWapi 2.0.5 默认 `MaxInflight=4`，所以 chat-team 当前最多允许 4 个 Web GPT 成员。每个网页窗口一次 `agent_exchange` 可以看到这一批 control，只处理 target 与自己身份一致的 request；其他 request 不回复，也不在网页输出“不能抢答/等待”等提示，而是继续工具循环。
-
-chat-team 等这一轮所有成员都返回后：
-
-1. 分别把 GPT-A / GPT-B / GPT-C 的回复显示到聊天室；
-2. 把本轮所有有效回复合并成 **一次** peer batch broadcast；
-3. 所有 Web GPT 都能看到这一轮其他成员的发言；
-4. 若还有下一轮，再同时发出下一批 control。
-
-所以一次三人一轮讨论大致是：
-
-```text
-用户正文           × 1 broadcast
-A/B/C 控制         × 3 并发小 control
-A/B/C 回复正文     × 1 合并 broadcast
-```
-
-用户正文和每个 GPT 回复正文仍只进入共享广播一次，不会为每个窗口复制三份。
+如果暂无任务，该命令会长轮询；有任务时返回 assignment、该成员自上次读取以来的所有未读消息，以及下一步提交命令。
 
 ## 启动
 
@@ -80,65 +65,125 @@ npm start
 http://127.0.0.1:32324
 ```
 
-界面中填写：
+页面中配置：
 
-- CWapi Agent Provider 地址，例如 `http://127.0.0.1:32123/v1`
-- Agent API Key
-- 房间名
-- Web GPT 成员名，例如 `GPT-A, GPT-B, GPT-C`，最多 4 个
-- 每次讨论轮数，1～3 轮
+- Coding 仓库，默认 `https://github.com/AAAYNMMM/chat-team`
+- 房间名，默认 `main`
+- Web GPT 成员，例如 `GPT-A, GPT-B, GPT-C`
+- 讨论轮数，1～6 轮
 
-API Key 只保存在当前 chat-team 服务进程内存中，不写入项目文件或浏览器存储。浏览器只保存地址、房间名、成员名和轮数。
+点击 **应用房间** 会创建一轮新的内存会话并清空该房间此前的运行态。
 
 ## Web GPT 窗口
 
-每个 Web GPT 窗口只需要绑定不同身份。界面会根据成员列表生成很短的启动提示词，例如：
+页面会给每个成员生成一条短提示词，例如 GPT-A：
 
 ```text
-@MCPagent 你是 chat-team 房间“main”中的成员“GPT-A”。调用 agent_open 后持续 agent_exchange；聊天室规则会随第一条用户消息发送。除非我让你退出，否则不要在网页输出“等待/不能抢答/不是我的请求”等提示，只持续处理 MCP。
+@MCPcoding 你是 chat-team 房间“main”中的成员“GPT-A”。先用 coding_open 打开 https://github.com/AAAYNMMM/chat-team 的 main，然后持续用 coding_exec 运行 node src/member.mjs exchange GPT-A main；严格按命令返回的 submit/next 操作并继续 exchange，直到我让你退出。不要在网页输出等待或空闲提示。
 ```
 
-完整聊天室规则不再放进复制提示词。每次连接后的**第一条用户 broadcast** 会同时携带：
+每个窗口只需要使用不同成员名。
 
-- chat-team 的完整 broadcast / control 处理规则；
-- 当前房间和成员列表；
-- 用户本次真实聊天正文。
-
-规则只发送一次。之后的用户消息、Web GPT 回复 broadcast 和 control 都只携带必要正文或 target，不再重复整套规则。各 Web GPT 自己的 ChatGPT 对话上下文会继续保留此前看到的规则和共享消息，因此不需要 chat-team 每轮重发完整历史。
-
-发送第一条用户消息前，应先让所有 Web GPT 窗口进入持续 `agent_exchange` 状态，否则尚未连接的窗口可能错过首次规则 broadcast。
-## 讨论轮数
-
-默认 1 轮：
+### exchange 首次等待
 
 ```text
-用户 -> [A / B / C 并发回答] -> 合并广播本轮回复 -> 等用户继续
+node src/member.mjs exchange GPT-A main
 ```
 
-2 轮时：
+有任务时返回类似：
 
-```text
-用户 -> [A / B / C 第 1 轮] -> 合并广播 -> [A / B / C 第 2 轮] -> 合并广播 -> 等用户继续
+```json
+{
+  "state": "assignment",
+  "assignment": {
+    "id": "turn-1-r1-a1",
+    "round": 1,
+    "total_rounds": 3
+  },
+  "messages": [
+    {
+      "sender": "你",
+      "content": "你们怎么看这个设计？"
+    }
+  ],
+  "submit": {
+    "command": "node",
+    "argv": [
+      "src/member.mjs",
+      "exchange",
+      "GPT-A",
+      "main",
+      "turn-1-r1-a1",
+      "<你的聊天室回复>"
+    ]
+  }
+}
 ```
 
-同一轮成员彼此独立回答，不会因先后顺序“抢答”；从第 2 轮开始，每个成员都能看到上一轮全部成员的观点并继续回应。
-
-用户选择几轮，就表示每个成员每轮都应实际发言。第 1 轮直接回答用户；第 2 轮起回应、质疑或补充上一轮其他成员观点，不再使用“无观点就跳过”的正常流程。
-
-为兼容已经记住旧规则的网页窗口，chat-team 仍会识别旧的 `[[SKIP]]`：第一次返回空内容或 `[[SKIP]]` 时，会自动对该成员补发一次 recovery control。若补发仍失败，只记录该成员本轮错误，**不会阻止下一轮继续执行**。
-
-## 可靠性边界
-
-原版 CWapi 没有“聊天室成员在线状态”这一概念，所以 chat-team 只能显示配置成员及当前控制请求状态，不能声称某个网页窗口一定在线。
-
-如果目标 Web GPT 窗口没有持续执行 `agent_exchange`，它的 control request 最终会超时，聊天室显示错误后继续处理其他成员。
-
-共享 broadcast 采用短时请求，默认保持 4 秒。每轮成员 control 全部结束后，chat-team 默认先等待 600 ms，让刚提交 completion 的网页窗口重新进入 `agent_exchange`，再发送本轮合并 broadcast。这样比原来的 1.5 秒窗口更不容易漏掉上一轮共享回复。control 默认等待 45 秒；空回复或旧 `[[SKIP]]` 会自动补发一次。可以通过环境变量调整：
+Web GPT 生成回复后执行返回的 `submit`，例如：
 
 ```text
-CHAT_TEAM_BROADCAST_MS
-CHAT_TEAM_CONTROL_TIMEOUT_MS
+node src/member.mjs exchange GPT-A main turn-1-r1-a1 "我的观点是……"
+```
+
+提交回复的同一次 exchange 可能直接返回下一轮 assignment。窗口应继续处理返回值，不要把它丢掉后重新开始一套状态。
+
+## 多轮讨论
+
+3 个成员、3 轮时：
+
+```text
+用户消息
+  ↓
+第 1 轮：A / B / C 各自拿到 assignment
+  ↓
+所有回复写入同一房间消息日志
+  ↓
+第 2 轮：每个成员通过自己的 cursor 收到上一轮尚未读过的消息
+  ↓
+第 3 轮
+  ↓
+完成
+```
+
+同一轮不要求严格先后。某成员如果晚一点请求 assignment，它甚至可以看到本轮已经先返回的其他成员消息，但不会丢内容。
+
+## 可靠性
+
+### 每成员 cursor
+
+chat-team 为每个成员保存独立 `cursor`：
+
+```text
+GPT-A cursor = 12
+GPT-B cursor = 12
+GPT-C cursor = 7
+```
+
+如果 GPT-C 暂停一段时间，当它下一次 exchange 时会读取：
+
+```text
+sequence 8 ... 12
+```
+
+因此不再存在“4 秒广播窗口没碰上，所以永远丢失上一轮正文”的问题。
+
+### assignment 幂等
+
+同一个 assignment 如果因为网页/工具重试被提交两次，第二次不会重复写入聊天室消息。
+
+### 成员超时
+
+默认 assignment 最长等待 180 秒。超时后会记录系统消息并继续后续轮次，避免一个关闭的网页窗口永久卡死整个房间。
+
+可通过环境变量调整：
+
+```text
 CHAT_TEAM_PORT
+CHAT_TEAM_ASSIGNMENT_TIMEOUT_MS
+CHAT_TEAM_MEMBER_ONLINE_MS
+CHAT_TEAM_URL
+CHAT_TEAM_EXCHANGE_WAIT_MS
 ```
 
 ## 开发验证
@@ -148,18 +193,20 @@ npm run check
 npm test
 ```
 
-测试覆盖：
+当前测试覆盖：
 
-- 只使用原版 `/v1/models` 和 `/v1/chat/completions`
-- 用户正文只广播一次
-- 每个 Web GPT 回复只广播一次
-- 控制请求按成员 target 定向
-- UTF-8 消息字节上限
+- 3 个成员多轮 assignment；
+- GPT-C 延迟读取仍能获得 A/B 已发送内容；
+- 成员错过一整个时间段后仍能补齐所有未读上下文；
+- assignment 重复提交幂等；
+- `src/member.mjs` CLI 到本地聊天室 API 的真实调用。
 
 ## 安全边界
 
-- 服务只监听 `127.0.0.1`
-- CWapi 地址只允许 `localhost / 127.0.0.1 / ::1`
-- Agent API Key 不写磁盘
-- 不修改 CWapi 配置、源码或 Agent Broker
-- 不使用文件或图片传输
+chat-team 只监听：
+
+```text
+127.0.0.1
+```
+
+Coding 模式下页面不再保存 CWapi API Key。CWapi / MCPcoding 的连接配置仍由你现有的 MCP 插件负责。
