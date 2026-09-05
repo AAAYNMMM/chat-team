@@ -216,4 +216,8 @@ test('browser helper manifest covers chat-team and ChatGPT pages', async () => {
   const content = await readFile('browser-extension/content.js', 'utf8');
   assert.match(content, /chat_team_prompt/);
   assert.match(content, /findSendButton/);
+  assert.match(content, /PENDING_PROMPT_KEY/);
+  assert.match(content, /waitUntilSent/);
+  assert.match(content, /attempts >= 8/);
+  assert.match(content, /CHAT_TEAM_AUTOSEND_FAILED/);
 });

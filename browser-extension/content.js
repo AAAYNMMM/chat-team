@@ -1,5 +1,7 @@
 (() => {
   const READY_SOURCE = 'chat-team-browser-helper';
+  const PENDING_PROMPT_KEY = 'chat-team.pendingPrompt';
+  const PENDING_AUTOSEND_KEY = 'chat-team.pendingAutosend';
 
   if (location.hostname === '127.0.0.1' && location.port === '32324') {
     const announce = () => window.postMessage({ source: READY_SOURCE, type: 'ready' }, '*');
@@ -11,15 +13,23 @@
   }
 
   const url = new URL(location.href);
-  const prompt = url.searchParams.get('chat_team_prompt');
-  const autosend = url.searchParams.get('chat_team_autosend') === '1';
+  const promptFromUrl = url.searchParams.get('chat_team_prompt');
+  const autosendFromUrl = url.searchParams.get('chat_team_autosend');
+
+  if (promptFromUrl) {
+    sessionStorage.setItem(PENDING_PROMPT_KEY, promptFromUrl);
+    sessionStorage.setItem(PENDING_AUTOSEND_KEY, autosendFromUrl === '1' ? '1' : '0');
+    url.searchParams.delete('chat_team_prompt');
+    url.searchParams.delete('chat_team_autosend');
+    history.replaceState(history.state, '', url.toString());
+  }
+
+  const prompt = promptFromUrl || sessionStorage.getItem(PENDING_PROMPT_KEY) || '';
+  const autosend = (autosendFromUrl ?? sessionStorage.getItem(PENDING_AUTOSEND_KEY)) === '1';
   if (!prompt) return;
 
-  url.searchParams.delete('chat_team_prompt');
-  url.searchParams.delete('chat_team_autosend');
-  history.replaceState(history.state, '', url.toString());
-
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const promptPrefix = prompt.slice(0, Math.min(48, prompt.length));
 
   function composerText(element) {
     if (!element) return '';
@@ -41,7 +51,11 @@
       const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
       if (descriptor?.set) descriptor.set.call(element, text);
       else element.value = text;
-      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: text,
+      }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
       return;
     }
@@ -65,6 +79,7 @@
       inputType: 'insertText',
       data: text,
     }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   function findSendButton() {
@@ -78,48 +93,88 @@
     ];
     for (const selector of selectors) {
       const button = document.querySelector(selector);
-      if (button && !button.disabled) return button;
+      if (button && button.isConnected && !button.disabled && button.getAttribute('aria-disabled') !== 'true') return button;
     }
     return null;
   }
 
-  async function waitForComposer(timeoutMs = 30000) {
+  async function waitForComposer(timeoutMs = 45000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const element = findComposer();
-      if (element) return element;
-      await sleep(100);
+      if (element && element.isConnected) return element;
+      await sleep(150);
     }
     throw new Error('CHAT_TEAM_COMPOSER_NOT_FOUND');
   }
 
-  async function submitPrompt() {
-    const composer = await waitForComposer();
-    fillComposer(composer, prompt);
-
-    const deadline = Date.now() + 15000;
+  async function ensurePromptInComposer(timeoutMs = 20000) {
+    const deadline = Date.now() + timeoutMs;
+    let composer = await waitForComposer();
     while (Date.now() < deadline) {
-      if (composerText(composer).trim()) {
-        const button = findSendButton();
-        if (button) {
-          button.click();
-          return;
-        }
+      if (!composer.isConnected) composer = await waitForComposer();
+      const current = composerText(composer);
+      if (!current.includes(promptPrefix)) fillComposer(composer, prompt);
+      await sleep(180);
+      if (composerText(composer).includes(promptPrefix)) return composer;
+    }
+    throw new Error('CHAT_TEAM_PROMPT_NOT_RECOGNIZED');
+  }
+
+  function clickSend(button) {
+    button.focus();
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+      button.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    button.click();
+  }
+
+  async function waitUntilSent(composer, timeoutMs = 2500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!composer.isConnected) return true;
+      const text = composerText(composer).trim();
+      if (!text || !text.includes(promptPrefix)) return true;
+      await sleep(120);
+    }
+    return false;
+  }
+
+  async function submitPrompt() {
+    let composer = await ensurePromptInComposer();
+    const deadline = Date.now() + 45000;
+    let attempts = 0;
+
+    while (Date.now() < deadline) {
+      if (!composer.isConnected) composer = await ensurePromptInComposer();
+      if (!composerText(composer).includes(promptPrefix)) {
+        composer = await ensurePromptInComposer();
       }
-      await sleep(100);
+
+      const button = findSendButton();
+      if (!button) {
+        await sleep(180);
+        continue;
+      }
+
+      attempts += 1;
+      clickSend(button);
+      if (await waitUntilSent(composer)) {
+        sessionStorage.removeItem(PENDING_PROMPT_KEY);
+        sessionStorage.removeItem(PENDING_AUTOSEND_KEY);
+        return;
+      }
+
+      if (attempts >= 8) break;
+      await sleep(350);
     }
 
-    composer.focus();
-    composer.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      code: 'Enter',
-      bubbles: true,
-      cancelable: true,
-    }));
+    throw new Error('CHAT_TEAM_AUTOSEND_FAILED');
   }
+
   if (autosend) {
     void submitPrompt().catch((error) => console.error('[chat-team helper]', error));
   } else {
-    void waitForComposer().then((composer) => fillComposer(composer, prompt));
+    void ensurePromptInComposer();
   }
 })();
