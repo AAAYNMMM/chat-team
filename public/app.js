@@ -1,4 +1,4 @@
-const $ = (id) => document.getElementById(id);
+﻿const $ = (id) => document.getElementById(id);
 const REPOSITORY_URL = 'https://github.com/AAAYNMMM/chat-team';
 
 const state = {
@@ -53,7 +53,7 @@ function configuredParticipants() {
 
 function promptFor(name) {
   const roomName = room.value.trim() || 'main';
-  return `@MCPcoding 你是 chat-team 房间“${roomName}”中的成员“${name}”。先用 coding_open 打开 ${REPOSITORY_URL} 的 main，然后持续用 coding_exec 运行 node src/member.mjs exchange ${name} ${roomName}。每次 exchange 都是瞬时调用：严格按返回的 submit/next 操作，命令返回后立即继续下一次 exchange；如果 coding_exec 暂时返回 CODING_COMMAND_ACTIVE，说明另一个成员的瞬时命令正在执行，直接重试同一 exchange，不要退出。不要长时间占用 coding_exec，也不要在网页输出等待、空闲或冲突提示，直到我让你退出。`;
+  return `@MCPcoding 你是 chat-team 房间“${roomName}”中的成员“${name}”。先用 coding_open 打开 ${REPOSITORY_URL} 的 main，然后使用 coding_exec 运行 node src/member.mjs exchange ${name} ${roomName}。exchange 为瞬时调用，只处理返回的当前任务。完成回复后等待下一次用户或 chat-team 触发，不要在网页中无限循环调用 exchange，不要长期占用 coding_exec。如果收到 CODING_COMMAND_ACTIVE，只表示其他成员正在使用 workspace，稍后重试即可。`;
 }
 
 function normalizedWebGptUrl() {
@@ -416,3 +416,4 @@ probeHelper();
 setTimeout(probeHelper, 500);
 setTimeout(probeHelper, 1500);
 void attachExistingRoom();
+
