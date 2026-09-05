@@ -54,7 +54,7 @@ API Key 只保存在当前 `chat-team` 服务进程内存中，不写入项目�
 
 原版 CWapi 2.0.5 的普通 Agent Broker 是单 request / 单 completion 模型，不适合直接把多个 Web GPT 当成独立聊天室成员。`chat-team` 使用一个与普通 `/v1/chat/completions` 完全分离的 Team Room 层，不改变原 Agent 客户端兼容行为。
 
-当前配套实现位于 CWapi 的 `feature/chat-team` 开发分支（基础实现提交 `49e71eeb`），提供：
+当前配套实现位于 CWapi 的 `feature/chat-team` 开发分支（当前已验证提交 `795e5f5c`），提供：
 
 ### Agent MCP
 
