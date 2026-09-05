@@ -22,7 +22,7 @@ chat-team <-> CWapi <----├─ Web GPT 3
 
 ## 启动
 
-需要 Node.js 20 或更高版本：
+需要 Node.js 20 或更高版本。当前没有第三方运行时依赖，不需要先安装一堆包来举行依赖树祭祀：
 
 ```powershell
 npm start
@@ -54,7 +54,7 @@ API Key 只保存在当前 `chat-team` 服务进程内存中，不写入项目�
 
 原版 CWapi 2.0.5 的普通 Agent Broker 是单 request / 单 completion 模型，不适合直接把多个 Web GPT 当成独立聊天室成员。`chat-team` 使用一个与普通 `/v1/chat/completions` 完全分离的 Team Room 层，不改变原 Agent 客户端兼容行为。
 
-当前配套实现位于 CWapi 的 `feature/chat-team` 开发分支，提供：
+当前配套实现位于 CWapi 的 `feature/chat-team` 开发分支（基础实现提交 `49e71eeb`），提供：
 
 ### Agent MCP
 
@@ -86,3 +86,12 @@ Authorization: Bearer <agent-api-key>
 - 本地 API Key 仅内存保存
 
 后续可在不改变消息协议的前提下继续增加 Markdown 渲染、消息引用、房间管理和本地历史持久化。
+
+## 验证
+
+```powershell
+npm run check
+npm test
+```
+
+测试会启动一个本地模拟 CWapi Provider，验证连接握手、Team Room 能力检测，以及“用户消息只上传一次并写入共享房间”的链路。

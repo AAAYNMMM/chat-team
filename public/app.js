@@ -30,7 +30,7 @@ updateJoinPrompt();
 
 function updateJoinPrompt() {
   const roomName = room.value.trim() || 'main';
-  joinPrompt.value = `@MCPagent 加入 chat-team 的 ${roomName} 房间，作为一个独立 Web GPT 参与者。先调用 agent_team_join 加入该房间，然后持续使用 agent_team_exchange 等待消息。收到用户或其他 Web GPT 的新消息时正常参与讨论；没有新消息就继续等待。不要使用普通 agent_exchange 处理聊天室消息。`;
+  joinPrompt.value = `@MCPagent 加入 chat-team 的 ${roomName} 房间，作为一个独立 Web GPT 参与者。先调用 agent_team_join 加入该房间，并保存返回的 participant_id。之后持续使用 agent_team_exchange 等待用户或其他 Web GPT 的消息。需要回复时，把回复内容通过下一次 agent_team_exchange 的 responses 发回共享房间，再继续等待；不要只在当前网页窗口输出回复，因为其他成员看不到。没有新消息就继续等待。不要使用普通 agent_exchange 处理聊天室消息。`;
 }
 
 function setConnection(connected, text, error = false) {
@@ -198,8 +198,14 @@ async function connect() {
     roomSubtitle.textContent = data.models?.length ? `CWapi · ${data.models.join(', ')}` : 'CWapi Agent 已连接';
     state.cursor = 0;
     state.participants.clear();
-    renderParticipants();
     messages.querySelectorAll('.message, .error-banner').forEach((node) => node.remove());
+    syncParticipants(data.initial?.participants || []);
+    for (const item of Array.isArray(data.initial?.messages) ? data.initial.messages : []) {
+      appendMessage(item);
+      const seq = Number(item.sequence || item.seq || 0);
+      if (seq > state.cursor) state.cursor = seq;
+    }
+    if (Number(data.initial?.cursor) > state.cursor) state.cursor = Number(data.initial.cursor);
     setConnection(true, '连接成功');
     startPolling();
     messageInput.focus();

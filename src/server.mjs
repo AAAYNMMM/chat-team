@@ -85,12 +85,15 @@ async function handleApi(req, res, url) {
       connection = { ...next, connected: false };
       try {
         const models = await cwapi('/models', { method: 'GET' });
+        const teamRoom = encodeURIComponent(next.room);
+        const initial = await cwapi(`/team/rooms/${teamRoom}/messages?after=0`, { method: 'GET' });
         connection.connected = true;
         return sendJson(res, 200, {
           connected: true,
           baseUrl: connection.baseUrl,
           room: connection.room,
           models: Array.isArray(models?.data) ? models.data.map((item) => item.id) : [],
+          initial,
         });
       } catch (error) {
         connection = previous;
