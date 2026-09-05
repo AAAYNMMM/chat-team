@@ -4,6 +4,7 @@ const state = {
   connected: false,
   cursor: 0,
   pollTimer: null,
+  polling: false,
   participants: new Map(),
 };
 
@@ -198,6 +199,7 @@ async function connect() {
     state.cursor = 0;
     state.participants.clear();
     renderParticipants();
+    messages.querySelectorAll('.message, .error-banner').forEach((node) => node.remove());
     setConnection(true, '连接成功');
     startPolling();
     messageInput.focus();
@@ -209,25 +211,33 @@ async function connect() {
 }
 
 async function pollMessages() {
-  if (!state.connected) return;
+  if (!state.connected || state.polling) return;
+  state.polling = true;
   try {
     const data = await api(`/api/messages?after=${state.cursor}`);
     syncParticipants(data.participants);
     const items = Array.isArray(data.messages) ? data.messages : [];
     for (const item of items) {
-      appendMessage(item);
       const seq = Number(item.sequence || item.seq || 0);
+      if (seq && seq <= state.cursor) continue;
+      appendMessage(item);
       if (seq > state.cursor) state.cursor = seq;
     }
     if (Number(data.cursor) > state.cursor) state.cursor = Number(data.cursor);
+    if (state.connected) {
+      connectionStatus.textContent = '连接成功';
+      connectionStatus.className = 'status online';
+    }
   } catch (error) {
     if (error.status === 404 || error.code === 'NOT_FOUND') {
-      showError('当前 CWapi 尚未提供 Team Room 接口。聊天室 UI 已就绪，但需要给 Agent 模式补上共享房间消息总线。');
+      showError('当前 CWapi 尚未提供 Team Room 接口，请更新到包含 chat-team 支持的版本。');
       stopPolling();
       return;
     }
     connectionStatus.textContent = `同步失败：${error.message}`;
     connectionStatus.className = 'status error';
+  } finally {
+    state.polling = false;
   }
 }
 
