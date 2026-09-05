@@ -44,13 +44,12 @@ function normalizeBaseUrl(value) {
 
 async function cwapi(path, init = {}) {
   if (!connection.apiKey) throw new Error('NOT_CONNECTED');
+  const headers = new Headers(init.headers || {});
+  headers.set('authorization', `Bearer ${connection.apiKey}`);
+  if (init.body != null && !headers.has('content-type')) headers.set('content-type', 'application/json');
   const response = await fetch(`${connection.baseUrl}${path}`, {
     ...init,
-    headers: {
-      authorization: `Bearer ${connection.apiKey}`,
-      'content-type': 'application/json',
-      ...(init.headers || {}),
-    },
+    headers,
   });
   const text = await response.text();
   let body = null;
@@ -85,7 +84,7 @@ async function handleApi(req, res, url) {
       const previous = connection;
       connection = { ...next, connected: false };
       try {
-        const models = await cwapi('/models', { method: 'GET', headers: { 'content-type': undefined } });
+        const models = await cwapi('/models', { method: 'GET' });
         connection.connected = true;
         return sendJson(res, 200, {
           connected: true,
@@ -111,7 +110,7 @@ async function handleApi(req, res, url) {
     try {
       const after = Math.max(0, Number(url.searchParams.get('after') || 0));
       const room = encodeURIComponent(connection.room);
-      const data = await cwapi(`/team/rooms/${room}/messages?after=${after}`, { method: 'GET', headers: { 'content-type': undefined } });
+      const data = await cwapi(`/team/rooms/${room}/messages?after=${after}`, { method: 'GET' });
       return sendJson(res, 200, data);
     } catch (error) {
       return sendJson(res, error.status || 502, { error: error.code || error.message, message: error.message });
@@ -172,3 +171,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`chat-team listening on http://${host}:${port}`);
 });
+

@@ -1,0 +1,5 @@
+﻿node_modules/
+.env
+.env.*
+chat-team-data/
+*.log

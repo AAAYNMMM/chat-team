@@ -35,6 +35,13 @@
         <div id="connectionStatus" class="status offline">未连接</div>
       </section>
 
+      <section class="panel join-panel">
+        <div class="panel-title">Web GPT 加入房间</div>
+        <p class="hint">每个网页窗口先执行一次下面的提示词，然后保持该窗口继续连接。</p>
+        <textarea id="joinPrompt" class="join-prompt" rows="5" readonly></textarea>
+        <button id="copyPromptButton" class="secondary">复制提示词</button>
+      </section>
+
       <section class="panel participants-panel">
         <div class="panel-title row">
           <span>参与者</span>

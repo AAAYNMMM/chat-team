@@ -20,9 +20,17 @@ const messageInput = $('messageInput');
 const sendButton = $('sendButton');
 const participants = $('participants');
 const participantCount = $('participantCount');
+const joinPrompt = $('joinPrompt');
+const copyPromptButton = $('copyPromptButton');
 
 baseUrl.value = sessionStorage.getItem('chat-team.baseUrl') || baseUrl.value;
 room.value = sessionStorage.getItem('chat-team.room') || room.value;
+updateJoinPrompt();
+
+function updateJoinPrompt() {
+  const roomName = room.value.trim() || 'main';
+  joinPrompt.value = `@MCPagent 加入 chat-team 的 ${roomName} 房间，作为一个独立 Web GPT 参与者。先调用 agent_team_join 加入该房间，然后持续使用 agent_team_exchange 等待消息。收到用户或其他 Web GPT 的新消息时正常参与讨论；没有新消息就继续等待。不要使用普通 agent_exchange 处理聊天室消息。`;
+}
 
 function setConnection(connected, text, error = false) {
   state.connected = connected;
@@ -67,6 +75,22 @@ function rememberParticipant(author, message) {
   renderParticipants();
 }
 
+function syncParticipants(items) {
+  if (!Array.isArray(items)) return;
+  state.participants.clear();
+  for (const item of items) {
+    const id = item.participant_id || item.id;
+    if (!id) continue;
+    state.participants.set(id, {
+      id,
+      name: item.participant_name || item.name || 'Web GPT',
+      active: item.active !== false,
+      lastSeen: item.last_seen_at || item.lastSeen || null,
+    });
+  }
+  renderParticipants();
+}
+
 function renderParticipants() {
   const list = [...state.participants.values()];
   participantCount.textContent = String(list.length);
@@ -88,7 +112,7 @@ function renderParticipants() {
     name.textContent = item.name;
     const meta = document.createElement('div');
     meta.className = 'participant-meta';
-    meta.textContent = 'Web GPT';
+    meta.textContent = item.active === false ? '暂离' : '在线 · Web GPT';
     text.append(name, meta);
     row.append(avatar, text);
     return row;
@@ -188,6 +212,7 @@ async function pollMessages() {
   if (!state.connected) return;
   try {
     const data = await api(`/api/messages?after=${state.cursor}`);
+    syncParticipants(data.participants);
     const items = Array.isArray(data.messages) ? data.messages : [];
     for (const item of items) {
       appendMessage(item);
@@ -240,6 +265,19 @@ function resizeComposer() {
 }
 
 connectButton.addEventListener('click', connect);
+room.addEventListener('input', updateJoinPrompt);
+copyPromptButton.addEventListener('click', async () => {
+  updateJoinPrompt();
+  try {
+    await navigator.clipboard.writeText(joinPrompt.value);
+    const previous = copyPromptButton.textContent;
+    copyPromptButton.textContent = '已复制';
+    setTimeout(() => { copyPromptButton.textContent = previous; }, 1200);
+  } catch {
+    joinPrompt.focus();
+    joinPrompt.select();
+  }
+});
 sendButton.addEventListener('click', sendMessage);
 messageInput.addEventListener('input', resizeComposer);
 messageInput.addEventListener('keydown', (event) => {
