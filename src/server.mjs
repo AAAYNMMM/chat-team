@@ -2,10 +2,13 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 const host = '127.0.0.1';
 const port = Number(process.env.CHAT_TEAM_PORT || 32324);
 const root = fileURLToPath(new URL('../public/', import.meta.url));
+const projectRoot = fileURLToPath(new URL('../', import.meta.url));
+const browserExtensionDir = join(projectRoot, 'browser-extension');
 const assignmentTimeoutMs = clampInt(process.env.CHAT_TEAM_ASSIGNMENT_TIMEOUT_MS, 180000, 30000, 600000);
 const memberOnlineMs = clampInt(process.env.CHAT_TEAM_MEMBER_ONLINE_MS, 90000, 10000, 600000);
 const maxParticipants = 8;
@@ -98,8 +101,6 @@ function createRoom(name, participants = ['GPT-A', 'GPT-B', 'GPT-C'], rounds = 1
     activeTurn: null,
     assignments: new Map(),
     members: new Map(),
-    version: 0,
-    waiters: new Set(),
   };
 }
 
@@ -114,27 +115,6 @@ function getRoom(name, create = false) {
   return room;
 }
 
-function signalRoom(room) {
-  room.version += 1;
-  for (const waiter of [...room.waiters]) waiter();
-}
-
-function waitForRoomChange(room, version, waitMs) {
-  if (room.version !== version || waitMs <= 0) return Promise.resolve();
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      room.waiters.delete(finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, waitMs);
-    room.waiters.add(finish);
-    if (room.version !== version) finish();
-  });
-}
 
 function memberState(room, name) {
   let state = room.members.get(name);
@@ -158,7 +138,6 @@ function appendMessage(room, { role, sender, content, turnId = '', round = 0 }) 
   };
   room.messages.push(message);
   if (room.messages.length > 2000) room.messages.splice(0, room.messages.length - 2000);
-  signalRoom(room);
   return message;
 }
 
@@ -215,7 +194,6 @@ function startRound(room, turn, round) {
       completedAt: 0,
     });
   }
-  signalRoom(room);
 }
 
 function startNextTurn(room) {
@@ -241,7 +219,6 @@ function maybeAdvance(room) {
   turn.status = 'completed';
   turn.completedAt = Date.now();
   room.activeTurn = null;
-  signalRoom(room);
   startNextTurn(room);
 }
 
@@ -322,7 +299,7 @@ function assignmentPayload(room, member, assignment) {
   };
 }
 
-async function memberExchange(room, member, response, waitMs) {
+async function memberExchange(room, member, response) {
   if (!room.participants.some((item) => item.toLocaleLowerCase() === member.toLocaleLowerCase())) {
     throw codedError('MEMBER_NOT_CONFIGURED', `${member} 不在房间成员列表中`, 403);
   }
@@ -332,35 +309,21 @@ async function memberExchange(room, member, response, waitMs) {
   if (response) submitMemberReply(room, canonical, response);
   expireAssignments(room);
 
-  const deadline = Date.now() + waitMs;
-  while (true) {
-    expireAssignments(room);
-    const assignment = findPendingAssignment(room, canonical);
-    if (assignment) return assignmentPayload(room, canonical, assignment);
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      state.lastSeenAt = Date.now();
-      return {
-        state: 'idle',
-        room: room.name,
-        member: canonical,
-        next: { command: 'node', argv: ['src/member.mjs', 'exchange', canonical, room.name] },
-        next_action: '立即继续执行同一 exchange 命令等待新任务；不要在网页输出等待/空闲提示。',
-      };
-    }
-    const version = room.version;
-    await waitForRoomChange(room, version, Math.min(remaining, 15000));
-  }
+  const assignment = findPendingAssignment(room, canonical);
+  if (assignment) return assignmentPayload(room, canonical, assignment);
+
+  return {
+    state: 'idle',
+    room: room.name,
+    member: canonical,
+    next: { command: 'node', argv: ['src/member.mjs', 'exchange', canonical, room.name] },
+    next_action: '立即再次执行同一 exchange 命令。每次 exchange 都是瞬时调用，不要在网页输出等待/空闲提示。',
+  };
 }
 
 function configureRoom(name, participants, rounds) {
-  const existing = rooms.get(name);
-  if (existing) {
-    for (const waiter of [...existing.waiters]) waiter();
-  }
   const room = createRoom(name, participants, rounds);
   rooms.set(name, room);
-  signalRoom(room);
   return room;
 }
 
@@ -388,6 +351,17 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, roomStatus(room));
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/browser-helper/open-folder') {
+    try {
+      if (process.platform === 'win32') {
+        const child = spawn('explorer.exe', [browserExtensionDir], { detached: true, stdio: 'ignore' });
+        child.unref();
+      }
+      return sendJson(res, 200, { path: browserExtensionDir, opened: process.platform === 'win32' });
+    } catch (error) {
+      return sendJson(res, 500, { error: 'HELPER_FOLDER_OPEN_FAILED', message: error?.message || String(error), path: browserExtensionDir });
+    }
+  }
   if (req.method === 'POST' && url.pathname === '/api/configure') {
     try {
       const body = await readJson(req);
@@ -438,8 +412,7 @@ async function handleApi(req, res, url) {
       const body = await readJson(req);
       const room = getRoom(body.room || 'main');
       const member = normalizeMember(body.member);
-      const waitMs = clampInt(body.wait_ms, 45000, 0, 120000);
-      const data = await memberExchange(room, member, body.response || null, waitMs);
+      const data = await memberExchange(room, member, body.response || null);
       return sendJson(res, 200, data);
     } catch (error) {
       return sendJson(res, error.status || 400, { error: error.code || error.message, message: error.message });

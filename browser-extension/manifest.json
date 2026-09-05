@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "chat-team Browser Helper",
+  "version": "0.1.0",
+  "description": "Opens ChatGPT member tabs from chat-team, fills the member bootstrap prompt, and submits it automatically.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "http://127.0.0.1:32324/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

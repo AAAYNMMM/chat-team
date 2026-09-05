@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const REPOSITORY_URL = 'https://github.com/AAAYNMMM/chat-team';
 
 const state = {
   configured: false,
@@ -7,9 +8,12 @@ const state = {
   polling: false,
   participants: [],
   totalRounds: 1,
+  helperReady: false,
 };
 
-const repositoryUrl = $('repositoryUrl');
+const webGptUrl = $('webGptUrl');
+const helperStatus = $('helperStatus');
+const helperFolderButton = $('helperFolderButton');
 const room = $('room');
 const participantNames = $('participantNames');
 const rounds = $('rounds');
@@ -26,12 +30,12 @@ const participants = $('participants');
 const participantCount = $('participantCount');
 const joinPrompts = $('joinPrompts');
 const promptCount = $('promptCount');
+const openAllButton = $('openAllButton');
 
-repositoryUrl.value = sessionStorage.getItem('chat-team.repositoryUrl') || repositoryUrl.value;
+webGptUrl.value = sessionStorage.getItem('chat-team.webGptUrl') || webGptUrl.value;
 room.value = sessionStorage.getItem('chat-team.room') || room.value;
 participantNames.value = sessionStorage.getItem('chat-team.participants') || participantNames.value;
 rounds.value = sessionStorage.getItem('chat-team.rounds') || rounds.value;
-renderJoinPrompts();
 
 function configuredParticipants() {
   const seen = new Set();
@@ -49,13 +53,34 @@ function configuredParticipants() {
 
 function promptFor(name) {
   const roomName = room.value.trim() || 'main';
-  const repo = repositoryUrl.value.trim() || 'https://github.com/AAAYNMMM/chat-team';
-  return `@MCPcoding 你是 chat-team 房间“${roomName}”中的成员“${name}”。先用 coding_open 打开 ${repo} 的 main，然后持续用 coding_exec 运行 node src/member.mjs exchange ${name} ${roomName}；严格按命令返回的 submit/next 操作并继续 exchange，直到我让你退出。不要在网页输出等待或空闲提示。`;
+  return `@MCPcoding 你是 chat-team 房间“${roomName}”中的成员“${name}”。先用 coding_open 打开 ${REPOSITORY_URL} 的 main，然后持续用 coding_exec 运行 node src/member.mjs exchange ${name} ${roomName}。每次 exchange 都是瞬时调用：严格按返回的 submit/next 操作，命令返回后立即继续下一次 exchange；如果 coding_exec 暂时返回 CODING_COMMAND_ACTIVE，说明另一个成员的瞬时命令正在执行，直接重试同一 exchange，不要退出。不要长时间占用 coding_exec，也不要在网页输出等待、空闲或冲突提示，直到我让你退出。`;
+}
+
+function normalizedWebGptUrl() {
+  const raw = webGptUrl.value.trim();
+  if (!raw) throw new Error('请先填写 Web GPT 页面 URL');
+  const url = new URL(raw);
+  const host = url.hostname.toLocaleLowerCase();
+  const allowed = host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'chat.openai.com';
+  if (url.protocol !== 'https:' || !allowed) throw new Error('目前自动启动只支持 chatgpt.com / chat.openai.com URL');
+  return url;
+}
+
+function launchMember(name) {
+  if (!state.helperReady) throw new Error('浏览器助手未检测到，请先加载 browser-extension 后刷新本页');
+  const url = normalizedWebGptUrl();
+  url.searchParams.set('chat_team_prompt', promptFor(name));
+  url.searchParams.set('chat_team_autosend', '1');
+  sessionStorage.setItem('chat-team.webGptUrl', webGptUrl.value.trim());
+  const opened = window.open(url.toString(), '_blank');
+  if (!opened) throw new Error('浏览器阻止了新标签页，请允许 chat-team 打开弹出窗口');
+  try { opened.opener = null; } catch {}
 }
 
 function renderJoinPrompts() {
   const names = configuredParticipants();
   promptCount.textContent = String(names.length);
+  openAllButton.disabled = !state.helperReady || !names.length;
   joinPrompts.replaceChildren(...names.map((name) => {
     const card = document.createElement('div');
     card.className = 'prompt-card';
@@ -65,24 +90,33 @@ function renderJoinPrompts() {
     title.textContent = name;
     const button = document.createElement('button');
     button.className = 'mini-button';
-    button.textContent = '复制';
-    button.addEventListener('click', async () => {
-      const text = promptFor(name);
+    button.textContent = '打开窗口';
+    button.disabled = !state.helperReady;
+    button.addEventListener('click', () => {
       try {
-        await navigator.clipboard.writeText(text);
-        button.textContent = '已复制';
-        setTimeout(() => { button.textContent = '复制'; }, 1200);
-      } catch {
-        window.prompt(`复制 ${name} 的启动提示词：`, text);
+        launchMember(name);
+      } catch (error) {
+        showError(error.message);
       }
     });
     head.append(title, button);
     const preview = document.createElement('div');
     preview.className = 'prompt-preview';
-    preview.textContent = `${name} · MCPcoding 持久收件箱`;
+    preview.textContent = `${name} · 瞬时 exchange · 自动填充并发送`;
     card.append(head, preview);
     return card;
   }));
+}
+
+function setHelperReady(ready) {
+  state.helperReady = ready;
+  helperStatus.textContent = ready ? '浏览器助手已就绪' : '浏览器助手未检测';
+  helperStatus.className = `status ${ready ? 'online' : 'offline'}`;
+  renderJoinPrompts();
+}
+
+function probeHelper() {
+  window.postMessage({ source: 'chat-team-page', type: 'probe-helper' }, '*');
 }
 
 function setConfigured(configured, text, error = false) {
@@ -109,7 +143,7 @@ function formatTime(value) {
 
 function statusText(item) {
   if (item.status === 'waiting_reply') return item.online ? `在线 · 等待第 ${item.round} 轮回复` : `未在线 · 第 ${item.round} 轮待回复`;
-  if (item.online) return '在线 · 等待新任务';
+  if (item.online) return '在线 · 瞬时轮询';
   return '离线/未轮询';
 }
 
@@ -225,7 +259,7 @@ function applyStatus(data) {
   renderParticipants(data.participants || []);
   updateQueueState(data);
   roomTitle.textContent = `# ${data.room || room.value.trim() || 'main'}`;
-  roomSubtitle.textContent = `CWapi Coding · 持久消息队列 · ${state.totalRounds} 轮`;
+  roomSubtitle.textContent = `CWapi Coding · 瞬时 exchange · 持久消息队列 · ${state.totalRounds} 轮`;
 }
 
 async function configure() {
@@ -238,11 +272,12 @@ async function configure() {
   connectionStatus.textContent = '配置中…';
   connectionStatus.className = 'status offline';
   try {
+    normalizedWebGptUrl();
     const data = await api('/api/configure', {
       method: 'POST',
       body: JSON.stringify({ room: room.value, participants: names, rounds: Number(rounds.value) }),
     });
-    sessionStorage.setItem('chat-team.repositoryUrl', repositoryUrl.value.trim());
+    sessionStorage.setItem('chat-team.webGptUrl', webGptUrl.value.trim());
     sessionStorage.setItem('chat-team.room', data.room);
     sessionStorage.setItem('chat-team.participants', names.join(', '));
     sessionStorage.setItem('chat-team.rounds', String(data.rounds));
@@ -335,10 +370,30 @@ async function attachExistingRoom() {
   }
 }
 
+helperFolderButton.addEventListener('click', async () => {
+  helperFolderButton.disabled = true;
+  try {
+    const data = await api('/api/browser-helper/open-folder', { method: 'POST', body: '{}' });
+    helperStatus.textContent = data.opened ? '已打开浏览器助手目录' : `浏览器助手目录：${data.path}`;
+    helperStatus.className = 'status online';
+  } catch (error) {
+    helperStatus.textContent = `打开助手目录失败：${error.message}`;
+    helperStatus.className = 'status error';
+  } finally {
+    helperFolderButton.disabled = false;
+  }
+});
 configureButton.addEventListener('click', configure);
 room.addEventListener('input', renderJoinPrompts);
-repositoryUrl.addEventListener('input', renderJoinPrompts);
 participantNames.addEventListener('input', renderJoinPrompts);
+webGptUrl.addEventListener('input', () => sessionStorage.setItem('chat-team.webGptUrl', webGptUrl.value.trim()));
+openAllButton.addEventListener('click', () => {
+  try {
+    for (const name of configuredParticipants()) launchMember(name);
+  } catch (error) {
+    showError(error.message);
+  }
+});
 sendButton.addEventListener('click', sendMessage);
 messageInput.addEventListener('input', resizeComposer);
 messageInput.addEventListener('keydown', (event) => {
@@ -347,8 +402,17 @@ messageInput.addEventListener('keydown', (event) => {
     void sendMessage();
   }
 });
+window.addEventListener('message', (event) => {
+  if (event.source === window && event.data?.source === 'chat-team-browser-helper' && event.data?.type === 'ready') {
+    setHelperReady(true);
+  }
+});
 window.addEventListener('beforeunload', stopPolling);
 
 setConfigured(false, '未配置');
+setHelperReady(false);
 renderParticipants([]);
+probeHelper();
+setTimeout(probeHelper, 500);
+setTimeout(probeHelper, 1500);
 void attachExistingRoom();

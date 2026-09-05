@@ -4,6 +4,7 @@ import http from 'node:http';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -196,4 +197,23 @@ test('member CLI talks to the local Coding room API', async (t) => {
   assert.equal(payload.member, 'GPT-A');
   assert.equal(payload.messages[0].content, 'CLI 测试');
   assert.deepEqual(payload.submit.argv.slice(0, 5), ['src/member.mjs', 'exchange', 'GPT-A', 'main', payload.assignment.id]);
+});
+test('idle exchange is instantaneous and never long-polls the Coding workspace', async (t) => {
+  const { base } = await startChatTeam(t);
+  await configure(base, 1, ['GPT-A']);
+  const started = Date.now();
+  const data = await exchange(base, 'GPT-A');
+  const elapsed = Date.now() - started;
+  assert.equal(data.state, 'idle');
+  assert.ok(elapsed < 1000, `idle exchange took ${elapsed}ms`);
+});
+
+test('browser helper manifest covers chat-team and ChatGPT pages', async () => {
+  const manifest = JSON.parse(await readFile('browser-extension/manifest.json', 'utf8'));
+  const matches = manifest.content_scripts?.[0]?.matches || [];
+  assert.ok(matches.includes('http://127.0.0.1:32324/*'));
+  assert.ok(matches.includes('https://chatgpt.com/*'));
+  const content = await readFile('browser-extension/content.js', 'utf8');
+  assert.match(content, /chat_team_prompt/);
+  assert.match(content, /findSendButton/);
 });

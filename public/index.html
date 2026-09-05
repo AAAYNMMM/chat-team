@@ -20,9 +20,12 @@
       <section class="panel connection-panel">
         <div class="panel-title">CWapi Coding 模式</div>
         <label>
-          <span>Coding 仓库</span>
-          <input id="repositoryUrl" value="https://github.com/AAAYNMMM/chat-team" spellcheck="false" />
+          <span>Web GPT 页面 URL</span>
+          <input id="webGptUrl" value="https://chatgpt.com/" spellcheck="false" />
         </label>
+        <div id="helperStatus" class="status offline">浏览器助手未检测</div>
+        <p class="hint helper-hint">首次使用需要在 Chrome / Edge 扩展页加载仓库里的 <code>browser-extension</code> 目录。之后只需填写 URL，chat-team 会自动打开新标签页、填入成员提示词并发送。</p>
+        <button id="helperFolderButton" class="secondary" type="button">打开浏览器助手目录</button>
         <label>
           <span>房间名</span>
           <input id="room" value="main" spellcheck="false" />
@@ -48,10 +51,11 @@
 
       <section class="panel join-panel">
         <div class="panel-title row">
-          <span>网页窗口启动提示词</span>
+          <span>Web GPT 窗口</span>
           <span id="promptCount" class="badge">3</span>
         </div>
-        <p class="hint">每个 Web GPT 窗口只绑定自己的成员名。之后通过 MCPcoding 直接轮询本机 chat-team，消息不会依赖 Agent 广播时机。</p>
+        <p class="hint">不再复制提示词。点击“打开窗口”会新建 ChatGPT 标签页并自动发送对应成员的 MCPcoding 启动命令。</p>
+        <button id="openAllButton" class="secondary" disabled>打开全部窗口</button>
         <div id="joinPrompts" class="join-prompts"></div>
       </section>
 
@@ -80,7 +84,7 @@
         <div class="welcome">
           <div class="welcome-icon">✦</div>
           <h3>一个人类，多个 Coding Web GPT，同一个房间。</h3>
-          <p>chat team 保存一次消息，每个成员用自己的读取游标可靠接收。窗口晚一点回来也会继续读未读内容，不再依赖短时 broadcast。</p>
+          <p>chat team 保存一次消息，每个成员用自己的读取游标可靠接收。每次 exchange 都是瞬时调用，因此多个 Coding 窗口不会再互相锁住 workspace。</p>
         </div>
       </section>
 

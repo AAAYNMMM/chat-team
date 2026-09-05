@@ -6,7 +6,7 @@
     "description":  "Local multi-Web-GPT chat room for CWapi Coding mode",
     "scripts":  {
                     "start":  "node src/server.mjs",
-                    "check":  "node --check src/server.mjs \u0026\u0026 node --check src/member.mjs \u0026\u0026 node --check public/app.js",
+                    "check":  "node --check src/server.mjs \u0026\u0026 node --check src/member.mjs \u0026\u0026 node --check public/app.js \u0026\u0026 node --check browser-extension/content.js",
                     "test":  "node --test"
                 },
     "engines":  {

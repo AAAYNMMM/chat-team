@@ -27,6 +27,10 @@ input:focus, textarea:focus, select:focus { border-color: #6875ef; box-shadow: 0
 .primary, .send { border: 0; background: #6875ef; color: white; border-radius: 10px; font-weight: 700; }
 .primary { width: 100%; padding: 10px; }
 .primary:disabled, .send:disabled { opacity: .45; cursor: default; }
+.secondary { width: 100%; margin: 8px 0 10px; padding: 9px 10px; border: 1px solid #30384b; background: #1a1f2b; color: #dce2ee; border-radius: 10px; font-weight: 650; }
+.secondary:hover:not(:disabled) { background: #202635; }
+.secondary:disabled, .mini-button:disabled { opacity: .45; cursor: default; }
+.helper-hint code { color: #c7cee0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .status { margin-top: 10px; font-size: 12px; }
 .status.online { color: #65d79d; }
 .status.offline { color: #8d95a5; }

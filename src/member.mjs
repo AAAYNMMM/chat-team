@@ -1,5 +1,4 @@
 const endpoint = String(process.env.CHAT_TEAM_URL || 'http://127.0.0.1:32324').replace(/\/+$/, '');
-const waitMs = Number(process.env.CHAT_TEAM_EXCHANGE_WAIT_MS || 45000);
 
 function usage() {
   console.error('Usage: node src/member.mjs exchange <member> [room] [assignment_id] [reply]');
@@ -12,7 +11,7 @@ if (command !== 'exchange' || !memberRaw) usage();
 const member = String(memberRaw).trim();
 const room = String(roomRaw || 'main').trim() || 'main';
 const reply = replyParts.join(' ').trim();
-const body = { room, member, wait_ms: waitMs };
+const body = { room, member };
 if (assignmentId) {
   if (!reply) {
     console.error('A reply is required when assignment_id is provided.');
@@ -26,7 +25,7 @@ try {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(Math.max(5000, waitMs + 10000)),
+    signal: AbortSignal.timeout(10000),
   });
   const text = await response.text();
   let data;
