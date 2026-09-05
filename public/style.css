@@ -10,7 +10,7 @@ body { margin: 0; min-width: 960px; background: #0b0d12; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 .app-shell { display: grid; grid-template-columns: 330px 1fr; width: 100vw; height: 100dvh; min-height: 0; overflow: hidden; }
-.sidebar { min-height: 0; border-right: 1px solid #202532; background: #11141b; padding: 20px; overflow: hidden; }
+.sidebar { min-height: 0; border-right: 1px solid #202532; background: #11141b; padding: 20px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .brand { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
 .brand-mark { width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center; background: #6f7bf7; color: white; font-weight: 800; }
 .brand h1, .chat-header h2 { margin: 0; }
