@@ -1,0 +1,73 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>chat team</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CT</div>
+        <div>
+          <h1>chat team</h1>
+          <p>多人 Web GPT 聊天室</p>
+        </div>
+      </div>
+
+      <section class="panel connection-panel">
+        <div class="panel-title">CWapi Agent</div>
+        <label>
+          <span>服务地址</span>
+          <input id="baseUrl" value="http://127.0.0.1:32123/v1" spellcheck="false" />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input id="apiKey" type="password" placeholder="输入 Agent API Key" autocomplete="off" />
+        </label>
+        <label>
+          <span>房间</span>
+          <input id="room" value="main" spellcheck="false" />
+        </label>
+        <button id="connectButton" class="primary">连接</button>
+        <div id="connectionStatus" class="status offline">未连接</div>
+      </section>
+
+      <section class="panel participants-panel">
+        <div class="panel-title row">
+          <span>参与者</span>
+          <span id="participantCount" class="badge">0</span>
+        </div>
+        <div id="participants" class="participants empty">等待成员进入房间</div>
+      </section>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div>
+          <h2 id="roomTitle"># main</h2>
+          <p id="roomSubtitle">连接 CWapi 后开始讨论</p>
+        </div>
+        <div id="liveState" class="live-state">离线</div>
+      </header>
+
+      <section id="messages" class="messages">
+        <div class="welcome">
+          <div class="welcome-icon">✦</div>
+          <h3>一个人类，几个 Web GPT，同一个房间。</h3>
+          <p>用户消息由 chat team 发给 CWapi。Web GPT 的消息从共享 Agent 房间同步回来，这里只负责把它们好好显示出来。</p>
+        </div>
+      </section>
+
+      <footer class="composer">
+        <textarea id="messageInput" rows="1" placeholder="连接后发送消息…" disabled></textarea>
+        <button id="sendButton" class="send" disabled>发送</button>
+      </footer>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
