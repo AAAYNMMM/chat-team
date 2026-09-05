@@ -144,7 +144,7 @@ function formatTime(value) {
 function statusText(item) {
   if (item.status === 'waiting_reply') return item.online ? `在线 · 等待第 ${item.round} 轮回复` : `未在线 · 第 ${item.round} 轮待回复`;
   if (item.online) return '最近活动 · 已连接';
-  return '离线/未轮询';
+  return '等待任务/未活动';
 }
 
 function renderParticipants(items = state.participants) {
@@ -416,4 +416,5 @@ probeHelper();
 setTimeout(probeHelper, 500);
 setTimeout(probeHelper, 1500);
 void attachExistingRoom();
+
 
