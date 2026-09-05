@@ -37,38 +37,34 @@ GPT-A / GPT-B / GPT-C 都能从同一个 Agent MCP 读到
 
 broadcast request 会保持一小段时间，让所有正在 `agent_exchange` 的网页窗口读取。它**不允许 completion**。广播窗口结束后，chat-team 主动取消这个 HTTP request；CWapi 会按原有客户端断开逻辑回收它。
 
-### 2. 定向控制请求
+### 2. 同轮并发控制请求
 
-chat-team 再发送很小的控制请求，决定当前轮到哪个窗口发言：
-
-```text
-control -> target=GPT-A
-control -> target=GPT-B
-control -> target=GPT-C
-```
-
-每个网页窗口启动时绑定唯一身份。只有 target 与自己身份一致的窗口才对 control request 提交 completion，其他窗口忽略。
-
-GPT-A 的 completion 返回 chat-team 后：
-
-1. chat-team 把 GPT-A 的回复显示在聊天室；
-2. 该回复再作为一个共享正文 broadcast **发送一次**；
-3. GPT-B / GPT-C 因此能看到 GPT-A 的内容；
-4. 然后 chat-team 再发送 `target=GPT-B` 的控制请求。
-
-所以一次三人讨论大致是：
+chat-team 在每一轮把所有成员的 control **同时发出**：
 
 ```text
-用户正文      × 1 broadcast
-GPT-A 控制    × 1 很小的 control
-GPT-A 回复    × 1 broadcast
-GPT-B 控制    × 1 很小的 control
-GPT-B 回复    × 1 broadcast
-GPT-C 控制    × 1 很小的 control
-GPT-C 回复    × 1 broadcast
+control -> target=GPT-A ┐
+control -> target=GPT-B ├─ 同时在 flight
+control -> target=GPT-C ┘
 ```
 
-不会把用户正文或 GPT 回复分别复制三份。
+原版 CWapi 2.0.5 默认 `MaxInflight=4`，所以 chat-team 当前最多允许 4 个 Web GPT 成员。每个网页窗口一次 `agent_exchange` 可以看到这一批 control，只处理 target 与自己身份一致的 request；其他 request 不回复，也不在网页输出“不能抢答/等待”等提示，而是继续工具循环。
+
+chat-team 等这一轮所有成员都返回后：
+
+1. 分别把 GPT-A / GPT-B / GPT-C 的回复显示到聊天室；
+2. 把本轮所有有效回复合并成 **一次** peer batch broadcast；
+3. 所有 Web GPT 都能看到这一轮其他成员的发言；
+4. 若还有下一轮，再同时发出下一批 control。
+
+所以一次三人一轮讨论大致是：
+
+```text
+用户正文           × 1 broadcast
+A/B/C 控制         × 3 并发小 control
+A/B/C 回复正文     × 1 合并 broadcast
+```
+
+用户正文和每个 GPT 回复正文仍只进入共享广播一次，不会为每个窗口复制三份。
 
 ## 启动
 
@@ -89,7 +85,7 @@ http://127.0.0.1:32324
 - CWapi Agent Provider 地址，例如 `http://127.0.0.1:32123/v1`
 - Agent API Key
 - 房间名
-- Web GPT 成员名，例如 `GPT-A, GPT-B, GPT-C`
+- Web GPT 成员名，例如 `GPT-A, GPT-B, GPT-C`，最多 4 个
 - 每次讨论轮数，1～3 轮
 
 API Key 只保存在当前 chat-team 服务进程内存中，不写入项目文件或浏览器存储。浏览器只保存地址、房间名、成员名和轮数。
@@ -116,16 +112,16 @@ API Key 只保存在当前 chat-team 服务进程内存中，不写入项目文�
 默认 1 轮：
 
 ```text
-用户 -> A -> B -> C -> 等用户继续
+用户 -> [A / B / C 并发回答] -> 合并广播本轮回复 -> 等用户继续
 ```
 
 2 轮时：
 
 ```text
-用户 -> A -> B -> C -> A -> B -> C -> 等用户继续
+用户 -> [A / B / C 第 1 轮] -> 合并广播 -> [A / B / C 第 2 轮] -> 合并广播 -> 等用户继续
 ```
 
-后发言的成员能看到前面成员的 broadcast，因此可以直接回应其他 Web GPT。第二轮开始后，较早发言的成员也可以回应第一轮后面的观点。
+同一轮成员彼此独立回答，不会因先后顺序“抢答”；从第 2 轮开始，每个成员都能看到上一轮全部成员的观点并继续回应。
 
 如果某成员本轮没有新的有价值内容，可以按协议返回：
 

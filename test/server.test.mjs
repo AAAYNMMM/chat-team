@@ -53,40 +53,41 @@ async function startChatTeam(t, extraEnv = {}) {
   return port;
 }
 
-test('original CWapi surface is enough and shared chat bodies are broadcast once', async (t) => {
+test('original CWapi surface batches participant controls and broadcasts replies once', async (t) => {
   const requests = [];
+  const pendingControls = [];
+  let releasedControlBatch = false;
   const mock = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer test-key') {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { code: 'invalid_api_key' } }));
       return;
     }
-
     if (req.method === 'GET' && req.url === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ data: [{ id: 'cwapi-web-gpt' }] }));
       return;
     }
-
     if (req.method === 'POST' && req.url === '/v1/chat/completions') {
       const body = await readBody(req);
       requests.push(body);
-      if (body.metadata?.chat_team_kind === 'broadcast') {
-        // Broadcast requests intentionally stay open. chat-team aborts them after
-        // a short delivery window, matching the real CWapi request lifecycle.
-        return;
-      }
+      if (body.metadata?.chat_team_kind === 'broadcast') return;
       if (body.metadata?.chat_team_kind === 'control') {
-        const target = body.metadata.chat_team_target;
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          id: `mock-${target}`,
-          choices: [{ index: 0, message: { role: 'assistant', content: `${target} reply` }, finish_reason: 'stop' }],
-        }));
+        pendingControls.push({ body, res });
+        if (pendingControls.length === 3 && !releasedControlBatch) {
+          releasedControlBatch = true;
+          for (const item of pendingControls) {
+            const target = item.body.metadata.chat_team_target;
+            item.res.writeHead(200, { 'content-type': 'application/json' });
+            item.res.end(JSON.stringify({
+              id: `mock-${target}`,
+              choices: [{ index: 0, message: { role: 'assistant', content: `${target} reply` }, finish_reason: 'stop' }],
+            }));
+          }
+        }
         return;
       }
     }
-
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
   });
@@ -98,20 +99,14 @@ test('original CWapi surface is enough and shared chat bodies are broadcast once
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      baseUrl: `http://127.0.0.1:${cwapiPort}/v1`,
-      apiKey: 'test-key',
-      room: 'main',
-      participants: ['GPT-A', 'GPT-B', 'GPT-C'],
-      rounds: 1,
+      baseUrl: `http://127.0.0.1:${cwapiPort}/v1`, apiKey: 'test-key', room: 'main',
+      participants: ['GPT-A', 'GPT-B', 'GPT-C'], rounds: 1,
     }),
   });
   assert.equal(connect.status, 200);
-  assert.equal((await connect.json()).connected, true);
 
   const send = await fetch(`http://127.0.0.1:${chatPort}/api/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content: 'hello team' }),
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'hello team' }),
   });
   assert.equal(send.status, 202);
 
@@ -121,48 +116,40 @@ test('original CWapi surface is enough and shared chat bodies are broadcast once
       if (!response.ok) return false;
       const body = await response.clone().json();
       return body.processing === false && body.messages?.filter((item) => item.role === 'assistant').length === 3;
-    },
-    10000,
+    }, 10000,
   );
 
+  assert.equal(releasedControlBatch, true, 'all participant controls must be in flight together');
   const transcript = await (await fetch(`http://127.0.0.1:${chatPort}/api/messages?after=0`)).json();
   assert.deepEqual(
     transcript.messages.filter((item) => item.role !== 'system').map((item) => [item.sender, item.content]),
-    [
-      ['你', 'hello team'],
-      ['GPT-A', 'GPT-A reply'],
-      ['GPT-B', 'GPT-B reply'],
-      ['GPT-C', 'GPT-C reply'],
-    ],
+    [['你', 'hello team'], ['GPT-A', 'GPT-A reply'], ['GPT-B', 'GPT-B reply'], ['GPT-C', 'GPT-C reply']],
   );
 
   const broadcasts = requests.filter((item) => item.metadata?.chat_team_kind === 'broadcast');
   const controls = requests.filter((item) => item.metadata?.chat_team_kind === 'control');
-  assert.equal(broadcasts.length, 4);
+  assert.equal(broadcasts.length, 2);
   assert.equal(controls.length, 3);
-  assert.deepEqual(controls.map((item) => item.metadata.chat_team_target), ['GPT-A', 'GPT-B', 'GPT-C']);
+  assert.deepEqual(controls.map((item) => item.metadata.chat_team_target).sort(), ['GPT-A', 'GPT-B', 'GPT-C']);
   assert.equal(broadcasts[0].metadata.chat_team_rules, 'included');
-  assert.equal(broadcasts[0].messages[0].role, 'system');
-  assert.match(broadcasts[0].messages[0].content, /chat-team 多人聊天室规则/);
+  assert.match(broadcasts[0].messages[0].content, /同一轮所有成员的 control 会并发出现/);
+  assert.match(broadcasts[0].messages[0].content, /不要在网页输出“不能抢答”/);
   assert.match(broadcasts[0].messages[1].content, /hello team/);
-  for (const item of broadcasts.slice(1)) {
-    assert.equal(item.metadata.chat_team_rules, 'remembered');
-    assert.equal(item.messages.length, 1);
-    assert.equal(item.messages[0].role, 'user');
-    assert.equal(JSON.stringify(item).includes('chat-team 多人聊天室规则'), false);
-  }
+  assert.equal(broadcasts[1].metadata.chat_team_message_kind, 'peer_batch');
+  assert.equal(broadcasts[1].messages.length, 1);
+  assert.match(broadcasts[1].messages[0].content, /GPT-A：GPT-A reply/);
+  assert.match(broadcasts[1].messages[0].content, /GPT-B：GPT-B reply/);
+  assert.match(broadcasts[1].messages[0].content, /GPT-C：GPT-C reply/);
+
   for (const item of controls) {
     assert.equal(item.messages.length, 1);
-    assert.equal(item.messages[0].role, 'user');
     assert.equal(JSON.stringify(item).includes('chat-team 多人聊天室规则'), false);
   }
-
   const serialized = requests.map((item) => JSON.stringify(item));
   assert.equal(serialized.filter((item) => item.includes('hello team')).length, 1);
   assert.equal(serialized.filter((item) => item.includes('GPT-A reply')).length, 1);
   assert.equal(serialized.filter((item) => item.includes('GPT-B reply')).length, 1);
   assert.equal(serialized.filter((item) => item.includes('GPT-C reply')).length, 1);
-
   assert.equal(requests.some((item) => JSON.stringify(item).includes('/team/rooms/')), false);
 });
 

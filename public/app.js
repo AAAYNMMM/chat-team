@@ -49,7 +49,7 @@ function configuredParticipants() {
 
 function promptFor(name) {
   const roomName = room.value.trim() || 'main';
-  return `@MCPagent 你是 chat-team 房间“${roomName}”中的成员“${name}”。调用 agent_open 后持续 agent_exchange；聊天室规则会由 chat-team 随第一条用户消息发送，之后一直按该规则处理，直到我让你退出。`;
+  return `@MCPagent 你是 chat-team 房间“${roomName}”中的成员“${name}”。调用 agent_open 后持续 agent_exchange；聊天室规则会随第一条用户消息发送。除非我让你退出，否则不要在网页输出“等待/不能抢答/不是我的请求”等提示，只持续处理 MCP。`;
 }
 function renderJoinPrompts() {
   const names = configuredParticipants();
@@ -79,7 +79,7 @@ function renderJoinPrompts() {
 
     const preview = document.createElement('div');
     preview.className = 'prompt-preview';
-    preview.textContent = `${name} · 首次消息接收规则`;
+    preview.textContent = `${name} · 身份绑定`;
     card.append(head, preview);
     return card;
   }));
