@@ -125,7 +125,7 @@ async function handleApi(req, res, url) {
       const body = await readJson(req);
       const content = String(body.content || '').trim();
       if (!content) return sendJson(res, 400, { error: 'MESSAGE_REQUIRED' });
-      if (content.length > 20000) return sendJson(res, 400, { error: 'MESSAGE_TOO_LONG' });
+      if (Buffer.byteLength(content, 'utf8') > 20 * 1024) return sendJson(res, 400, { error: 'MESSAGE_TOO_LONG' });
       const room = encodeURIComponent(connection.room);
       const data = await cwapi(`/team/rooms/${room}/messages`, {
         method: 'POST',

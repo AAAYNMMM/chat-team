@@ -82,6 +82,14 @@ test('chat-team proxies one user message into the CWapi team room', async (t) =>
   });
   assert.equal(send.status, 201);
   assert.deepEqual(seen, [{ role: 'user', content: 'hello team' }]);
+
+  const oversized = await fetch(`http://127.0.0.1:${chatPort}/api/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: '中'.repeat(7000) }),
+  });
+  assert.equal(oversized.status, 400);
+  assert.equal(seen.length, 1);
 });
 
 test('connect rejects a CWapi provider without the team-room surface', async (t) => {
